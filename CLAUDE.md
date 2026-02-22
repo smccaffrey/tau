@@ -1,190 +1,340 @@
 # CLAUDE.md — Tau Pipelines
 
-## What This Is
-Tau Pipelines is an AI-native data orchestration framework. A standalone daemon (`taud`) with a CLI (`tau`) that AI agents use as a tool to build, schedule, and operate data pipelines.
+## What You Need to Know
 
-## Stack
-- Python 3.12+
-- **uv** for dependency management (NOT pip, NOT poetry)
-- FastAPI for the daemon API server
-- Typer for the CLI
-- SQLAlchemy (async) + Alembic for PostgreSQL metadata store
-- APScheduler for the built-in scheduler
-- Pydantic for all schemas/models
+Tau is a data pipeline orchestration daemon. Users install it, start it (`taud`), and then **you** (the AI) write pipeline files and operate them through the `tau` CLI. That's the entire workflow.
 
-## Project Structure
-```
-tau-pipelines/
-├── pyproject.toml              # uv project config
-├── alembic.ini
-├── alembic/
-│   └── versions/
-├── src/
-│   └── tau/
-│       ├── __init__.py         # version, public API
-│       ├── cli/
-│       │   ├── __init__.py
-│       │   └── main.py         # Typer CLI app (tau command)
-│       ├── daemon/
-│       │   ├── __init__.py
-│       │   ├── app.py          # FastAPI app (taud)
-│       │   ├── scheduler.py    # APScheduler integration
-│       │   └── executor.py     # Pipeline execution engine
-│       ├── core/
-│       │   ├── __init__.py
-│       │   ├── config.py       # Settings (from tau.toml + env vars)
-│       │   ├── database.py     # Async SQLAlchemy engine/session
-│       │   └── auth.py         # API key auth
-│       ├── models/
-│       │   ├── __init__.py
-│       │   ├── pipeline.py     # Pipeline SQLAlchemy model
-│       │   ├── run.py          # PipelineRun model
-│       │   └── schedule.py     # Schedule model
-│       ├── schemas/
-│       │   ├── __init__.py
-│       │   ├── pipeline.py     # Pydantic schemas
-│       │   ├── run.py
-│       │   └── schedule.py
-│       ├── api/
-│       │   ├── __init__.py
-│       │   ├── router.py       # Main API router
-│       │   ├── pipelines.py    # Pipeline CRUD endpoints
-│       │   ├── runs.py         # Run endpoints
-│       │   └── schedules.py    # Schedule endpoints
-│       ├── services/
-│       │   ├── __init__.py
-│       │   ├── pipeline_service.py
-│       │   ├── run_service.py
-│       │   └── schedule_service.py
-│       ├── repositories/
-│       │   ├── __init__.py
-│       │   ├── pipeline_repo.py
-│       │   ├── run_repo.py
-│       │   └── schedule_repo.py
-│       ├── pipeline/
-│       │   ├── __init__.py
-│       │   ├── context.py      # PipelineContext
-│       │   ├── decorators.py   # @pipeline decorator
-│       │   ├── loader.py       # Load pipeline code from files
-│       │   └── types.py        # Pipeline types/enums
-│       └── connectors/
-│           ├── __init__.py
-│           ├── base.py         # Base connector interface
-│           ├── postgres.py
-│           ├── http_api.py
-│           └── s3.py
-├── tests/
-│   ├── conftest.py
-│   ├── test_cli.py
-│   ├── test_daemon.py
-│   └── test_pipeline.py
-├── examples/
-│   ├── hello_pipeline.py       # Simplest possible pipeline
-│   ├── shopify_sync.py         # Real-world example
-│   └── sql_transform.py        # ELT example with ctx.sql()
-└── tau.example.toml            # Example config
+**You only write pipeline files.** You never modify daemon code, scheduler config, or infrastructure. Pipelines are like Airflow DAGs — the only user-authored code in the system.
+
+## The Workflow
+
+```bash
+# 1. User installs and starts the daemon (one-time)
+pip install tau-pipelines
+taud
+
+# 2. You write a pipeline file
+# (this is the ONLY code you write)
+
+# 3. You deploy and operate it via CLI
+tau deploy my_pipeline.py --schedule "0 6 * * *"
+tau run my_pipeline
+tau inspect my_pipeline --last-run
+tau errors
+tau heal my_pipeline --auto
 ```
 
-## Architecture Rules
-1. **Layered architecture**: api → services → repositories → models (same as Synapse)
-2. **Async everything**: All DB operations, all HTTP, all pipeline execution
-3. **Pydantic schemas for all API input/output** — never expose SQLAlchemy models directly
-4. **Every API endpoint authenticated** via API key (Bearer token in Authorization header)
-5. **Structured JSON responses** — AI agents consume the API, so responses must be machine-readable
-6. **No YAML config for pipelines** — pipelines are pure Python code
+## Writing Pipelines
 
-## Key Components to Build
+Every pipeline is a single Python file with a `@pipeline` decorator:
 
-### 1. CLI (`tau`) — Typer app
-Entry points: `tau` and `taud`
-- `tau deploy <file>` — POST pipeline code to daemon
-- `tau run <name>` — trigger a run
-- `tau list` — list pipelines
-- `tau inspect <name> --last-run` — get structured execution trace
-- `tau schedule <name> <cron>` — set schedule
-- `tau schedules` — list all schedules
-- `tau errors` — recent failures
-- `tau logs <name> --run <id>` — run logs
-- `tau heal <name>` — diagnose failure (Phase 2, stub for now)
-- `taud start [--daemon] [--port PORT]` — start the daemon
-
-The CLI reads TAU_HOST and TAU_API_KEY from env (or ~/.config/tau/environments.toml) and makes HTTP calls to the daemon.
-
-### 2. Daemon (`taud`) — FastAPI app
-- Starts on port 8400 by default
-- Serves the REST API
-- Runs the scheduler (APScheduler)
-- Manages pipeline execution
-- Stores metadata in PostgreSQL
-
-### 3. Pipeline Runtime
-- `@pipeline` decorator that registers metadata
-- `PipelineContext` with:
-  - `ctx.extract()` — pull data from a source
-  - `ctx.transform()` — transform data
-  - `ctx.load()` — push data to a target
-  - `ctx.sql()` — run SQL in a warehouse
-  - `ctx.check()` — run assertions
-  - `ctx.secret()` — access secrets
-  - `ctx.last_successful_run` — timestamp of last success
-- Pipeline code is stored as files on the daemon
-
-### 4. Executor
-- Runs pipelines as subprocesses
-- Captures structured execution traces (JSON)
-- Handles timeouts, retries
-- Stores results in PostgreSQL
-
-### 5. Scheduler
-- Uses APScheduler with PostgreSQL job store
-- Supports cron expressions and intervals
-- Triggers pipeline runs via the executor
-
-## pyproject.toml
-Use uv. Package name: `tau-pipelines`. Entry points:
-```toml
-[project.scripts]
-tau = "tau.cli.main:app"
-taud = "tau.daemon.app:main"
-```
-
-## What to Build Now (Phase 1 MVP)
-Build everything in the structure above. Make it functional end-to-end:
-1. `taud start` — starts daemon with FastAPI + scheduler
-2. `tau deploy examples/hello_pipeline.py` — registers a pipeline
-3. `tau run hello_pipeline` — executes it
-4. `tau inspect hello_pipeline --last-run` — shows structured trace
-5. `tau schedule hello_pipeline "*/5 * * * *"` — schedules it
-6. `tau list` — shows registered pipelines
-7. `tau errors` — shows failures
-
-For the MVP, use SQLite instead of PostgreSQL so there's zero setup required. We'll add PostgreSQL support later.
-
-## Example Pipeline (build this as examples/hello_pipeline.py)
 ```python
 from tau import pipeline, PipelineContext
 
 @pipeline(
-    name="hello_world",
-    description="A simple hello world pipeline",
-    tags=["example"],
+    name="my_pipeline",
+    description="What it does",
+    schedule="0 6 * * *",       # Optional: cron schedule
+    tags=["warehouse", "etl"],  # Optional: tags
 )
-async def hello_world(ctx: PipelineContext):
-    ctx.log("Hello from Tau!")
-    
-    # Simple extract
-    data = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
-    ctx.log(f"Extracted {len(data)} records")
-    
-    # Simple transform
-    transformed = [{"id": r["id"], "name": r["name"].upper()} for r in data]
-    ctx.log(f"Transformed {len(transformed)} records")
-    
-    # Check
-    assert len(transformed) > 0, "No records to process"
-    
-    return {"records_processed": len(transformed)}
+async def my_pipeline(ctx: PipelineContext):
+    # Your logic here
+    ctx.log("message")
+    return {"result": "value"}
 ```
 
-## Commit when done
-Commit with message: "feat: tau pipelines phase 1 MVP — daemon, CLI, scheduler, executor"
+### PipelineContext API
+
+```python
+ctx.log("message")                          # Structured log line
+ctx.step("name")                            # Named step (async with ctx.step("extract") as step:)
+ctx.secret("ENV_VAR")                       # Read from environment
+ctx.materialize(config, connector, dialect) # Materialize a table
+ctx.last_successful_run                     # Datetime of last success (or None)
+ctx.run_id                                  # Current run ID
+ctx.params                                  # Dict of params passed to this run
+```
+
+### Step Tracing
+
+Always wrap logical stages in `ctx.step()`:
+
+```python
+async with ctx.step("extract") as step:
+    data = await source.extract(query="SELECT * FROM users")
+    step.rows_out = len(data)
+
+async with ctx.step("load") as step:
+    step.rows_in = len(data)
+    await target.load(data, table="users")
+```
+
+## Connectors
+
+Use connectors for data sources/targets. Import the factory function, configure, use as async context manager:
+
+```python
+from tau.connectors.postgres import postgres
+from tau.connectors.bigquery import bigquery
+from tau.connectors.snowflake import snowflake
+from tau.connectors.motherduck import motherduck, duckdb_local
+from tau.connectors.redshift import redshift
+from tau.connectors.clickhouse import clickhouse
+from tau.connectors.mysql import mysql
+from tau.connectors.http_api import http_api
+from tau.connectors.s3 import s3
+
+# All connectors follow the same pattern:
+async with postgres(dsn="postgresql://...") as db:
+    data = await db.extract(query="SELECT * FROM users")
+    await db.load(data, table="target", mode="upsert", merge_key="id")
+    await db.execute("CREATE INDEX ...")
+```
+
+### Connector methods:
+- `extract(query, params)` → `list[dict]`
+- `load(data, table, mode, merge_key)` → `int` (rows loaded)
+- `execute(query, params)` → result
+- `get_schema(table)` → column info
+
+### Load modes:
+- `"append"` — INSERT (default)
+- `"replace"` — TRUNCATE + INSERT
+- `"upsert"` — INSERT ... ON CONFLICT DO UPDATE (requires `merge_key`)
+
+## Materializations
+
+For SQL-capable connectors, use the materialization engine instead of raw SQL:
+
+```python
+from tau.materializations import (
+    FullRefreshConfig,       # DROP + CREATE AS
+    IncrementalConfig,       # MERGE / delete+insert / insert_overwrite
+    PartitionedConfig,       # Partition-aware incremental
+    SCDType1Config,          # Overwrite changed values
+    SCDType2Config,          # Track full history (valid_from/valid_to)
+    SnapshotConfig,          # Point-in-time copies with retention
+    MaterializationConfig,   # Base (for APPEND_ONLY and VIEW)
+    MaterializationType,     # Enum of all strategies
+)
+
+result = await ctx.materialize(config, connector=db, dialect="postgres")
+```
+
+### Full Refresh
+```python
+FullRefreshConfig(
+    target_table="analytics.dim_products",
+    source_query="SELECT * FROM raw.products",
+    pre_hook="DROP INDEX IF EXISTS idx_sku",      # Optional
+    post_hook="CREATE INDEX idx_sku ON ...(sku)",  # Optional
+)
+```
+
+### Incremental
+```python
+IncrementalConfig(
+    target_table="analytics.orders",
+    source_query="SELECT * FROM raw.orders",
+    unique_key="order_id",                         # Required for merge
+    incremental_column="updated_at",               # Filter new rows
+    incremental_strategy="merge",                  # merge | delete+insert | insert_overwrite
+    on_schema_change="append_new_columns",         # ignore | fail | append_new_columns
+)
+```
+
+### Partitioned
+```python
+PartitionedConfig(
+    target_table="analytics.events",
+    source_query="SELECT * FROM raw.events",
+    unique_key="event_id",
+    partition_by="event_date",
+    partition_type="date",                         # date | range | list
+    partition_granularity="day",                   # hour | day | month | year
+    cluster_by=["user_id", "event_type"],         # BigQuery/Snowflake clustering
+    incremental_column="created_at",
+    partition_expiration_days=90,                   # Auto-delete old partitions
+)
+```
+
+### SCD Type 1
+```python
+SCDType1Config(
+    target_table="analytics.dim_products",
+    source_query="SELECT * FROM raw.products",
+    unique_key="product_id",
+    tracked_columns=["name", "price", "category"], # Which columns trigger an update
+    updated_at_column="updated_at",                # Auto-set on change
+)
+```
+
+### SCD Type 2
+```python
+SCDType2Config(
+    target_table="analytics.dim_customers",
+    source_query="SELECT customer_id, name, tier FROM raw.customers",
+    unique_key="customer_id",
+    tracked_columns=["name", "tier"],              # Changes trigger new version
+    valid_from_column="valid_from",
+    valid_to_column="valid_to",
+    is_current_column="is_current",
+    hash_column="row_hash",
+    invalidate_hard_deletes=True,                  # Close records that disappear
+)
+```
+
+### Snapshot
+```python
+SnapshotConfig(
+    target_table="analytics.balance_snapshots",
+    source_query="SELECT * FROM raw.accounts",
+    snapshot_timestamp_column="snapshot_at",
+    snapshot_id_column="snapshot_id",
+    retain_snapshots=30,                           # Prune older snapshots
+)
+```
+
+### Append Only / View
+```python
+MaterializationConfig(
+    target_table="raw.api_logs",
+    source_query="SELECT * FROM staging.buffer",
+    strategy=MaterializationType.APPEND_ONLY,
+)
+
+MaterializationConfig(
+    target_table="reporting.v_active_users",
+    source_query="SELECT * FROM ... WHERE ...",
+    strategy=MaterializationType.VIEW,
+)
+```
+
+### Dialects
+Pass `dialect=` to `ctx.materialize()` to get warehouse-native SQL:
+- `"postgres"` (default) — standard SQL
+- `"bigquery"` — `PARTITION BY DATE_TRUNC(...)`, `CLUSTER BY`, `CURRENT_TIMESTAMP()`
+- `"snowflake"` — MD5 hashing, standard SQL
+- `"clickhouse"` — `MergeTree()` engine, `toString()`, `concat()`
+- `"mysql"` — standard SQL
+- `"duckdb"` — standard SQL
+
+## CLI Commands You Use
+
+```bash
+# Deploy a pipeline file to the daemon
+tau deploy my_pipeline.py [--schedule "0 6 * * *"] [--name override]
+
+# Run a pipeline
+tau run <name> [--params '{"key": "value"}']
+
+# Inspect last run (structured JSON — read this to diagnose issues)
+tau inspect <name> --last-run
+
+# List all pipelines
+tau list
+
+# View pipeline source code
+tau code <name>
+
+# See recent failures
+tau errors [--limit 20]
+
+# View run logs
+tau logs <name> [--run <run_id>]
+
+# List runs
+tau runs <name> [--last 10]
+
+# Schedule management
+tau schedule <name> "0 6 * * *"
+tau schedule <name> --every 3600
+tau schedule <name> --disable
+
+# AI-powered
+tau create "description of what you want"   # Generate pipeline from intent
+tau heal <name> [--auto]                    # Diagnose + fix failures
+
+# Daemon info
+tau status
+tau version
+```
+
+## Project Structure
+
+```
+src/tau/
+├── __init__.py              # Exports: pipeline, PipelineContext
+├── cli/main.py              # Typer CLI (tau command)
+├── daemon/
+│   ├── app.py               # FastAPI daemon (taud)
+│   ├── scheduler.py         # APScheduler
+│   └── executor.py          # Pipeline runner
+├── pipeline/
+│   ├── context.py           # PipelineContext
+│   ├── decorators.py        # @pipeline decorator
+│   └── loader.py            # Pipeline file loader
+├── connectors/              # All data connectors
+│   ├── base.py              # Connector ABC
+│   ├── postgres.py, bigquery.py, snowflake.py, ...
+├── materializations/        # Table materialization engine
+│   ├── strategies.py        # Config dataclasses
+│   └── engine.py            # SQL generation + execution
+├── api/                     # REST API endpoints
+├── services/                # Business logic
+├── repositories/            # Data access
+├── models/                  # SQLAlchemy models
+└── schemas/                 # Pydantic DTOs
+```
+
+**Do not modify** anything outside of pipeline files unless explicitly asked to work on Tau's internals.
+
+## Stack
+- Python 3.12+, uv (NOT pip/poetry)
+- FastAPI (daemon), Typer (CLI)
+- SQLAlchemy async + SQLite (dev) / PostgreSQL (prod)
+- APScheduler, Pydantic, httpx
+
+## Testing
+
+```bash
+uv run pytest                    # All tests
+uv run pytest tests/ -v          # Verbose
+uv run pytest tests/test_materializations.py  # Specific file
+```
+
+## Common Patterns
+
+### Full warehouse ETL (multiple materializations in one pipeline):
+```python
+@pipeline(name="warehouse_etl", schedule="0 4 * * *")
+async def warehouse_etl(ctx: PipelineContext):
+    db = postgres(dsn=ctx.secret("WAREHOUSE_DSN"))
+    async with db:
+        await ctx.materialize(FullRefreshConfig(...), connector=db)
+        await ctx.materialize(SCDType2Config(...), connector=db)
+        await ctx.materialize(IncrementalConfig(...), connector=db)
+        await ctx.materialize(MaterializationConfig(..., strategy=MaterializationType.VIEW), connector=db)
+```
+
+### API → Warehouse:
+```python
+@pipeline(name="api_sync")
+async def api_sync(ctx: PipelineContext):
+    api = http_api(base_url="https://api.example.com")
+    db = postgres(dsn=ctx.secret("WAREHOUSE_DSN"))
+    async with api, db:
+        data = await api.extract(endpoint="/users")
+        await db.load(data, table="raw.users", mode="upsert", merge_key="id")
+```
+
+### Cross-warehouse sync:
+```python
+@pipeline(name="bq_to_pg")
+async def bq_to_pg(ctx: PipelineContext):
+    bq = bigquery(project="my-project", credentials_path="...")
+    pg = postgres(dsn=ctx.secret("PG_DSN"))
+    async with bq, pg:
+        data = await bq.extract(query="SELECT * FROM dataset.users")
+        await pg.load(data, table="users", mode="upsert", merge_key="user_id")
+```
