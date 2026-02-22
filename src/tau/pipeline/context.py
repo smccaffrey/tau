@@ -66,6 +66,16 @@ class PipelineContext:
         self.log(f"SQL: {query[:80]}...")
         return []
 
+    async def materialize(self, config, connector=None, dialect: str = "postgres") -> dict:
+        """Materialize a table using a strategy (full_refresh, incremental, scd2, etc.)."""
+        from tau.materializations.engine import MaterializationEngine
+        if connector is None:
+            raise ValueError("A SQL-capable connector is required for materialization")
+        engine = MaterializationEngine(executor=connector, dialect=dialect)
+        result = await engine.materialize(config)
+        self.log(f"Materialized {config.target_table}: strategy={config.strategy.value}, rows={result.get('rows', '?')}")
+        return result
+
     async def check(self, *assertions) -> None:
         """Run assertions. Raises on failure."""
         for i, assertion in enumerate(assertions):
