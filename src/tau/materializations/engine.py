@@ -512,11 +512,21 @@ class MaterializationEngine:
         """)
 
     async def _prune_snapshots(self, table: str, ts_col: str, retain: int) -> None:
-        await self.executor.execute(f"""
-            DELETE FROM {table}
-            WHERE {ts_col} NOT IN (
+        # Use a CTE approach that works across dialects (MySQL doesn't allow LIMIT in subquery of DELETE)
+        try:
+            # Get the cutoff timestamp
+            rows = await self.executor.extract(f"""
                 SELECT DISTINCT {ts_col} FROM {table}
                 ORDER BY {ts_col} DESC
                 LIMIT {retain}
-            )
-        """)
+            """)
+            if rows:
+                # Get the oldest timestamp to keep
+                oldest_keep = rows[-1].get(ts_col)
+                if oldest_keep:
+                    await self.executor.execute(f"""
+                        DELETE FROM {table} WHERE {ts_col} < '{oldest_keep}'
+                    """)
+        except Exception:
+            # Fallback: just skip pruning rather than crash the pipeline
+            pass

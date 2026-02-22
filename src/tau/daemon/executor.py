@@ -6,7 +6,7 @@ import importlib.util
 import sys
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +33,11 @@ async def execute_pipeline(
     params: dict | None = None,
     timeout_seconds: int = 1800,
     last_successful_run: datetime | None = None,
+    retry_count: int = 0,
 ) -> ExecutionResult:
     """Execute pipeline code and return structured results."""
     result = ExecutionResult()
-    result.started_at = datetime.utcnow()
+    result.started_at = datetime.now(tz=timezone.utc)
     result.status = RunStatus.RUNNING.value
 
     ctx = PipelineContext(
@@ -68,12 +69,26 @@ async def execute_pipeline(
         result.result = pipeline_result if isinstance(pipeline_result, dict) else {"output": str(pipeline_result)}
 
     except Exception as e:
+        # Retry logic
+        if retry_count > 0:
+            ctx.log(f"FAILED: {type(e).__name__}: {str(e)} — retrying ({retry_count} left)")
+            await asyncio.sleep(min(2 ** (3 - retry_count), 10))  # Exponential backoff, max 10s
+            return await execute_pipeline(
+                pipeline_name=pipeline_name,
+                code=code,
+                run_id=run_id,
+                params=params,
+                timeout_seconds=timeout_seconds,
+                last_successful_run=last_successful_run,
+                retry_count=retry_count - 1,
+            )
+
         result.status = RunStatus.FAILED.value
         result.error = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         ctx.log(f"FAILED: {type(e).__name__}: {str(e)}")
 
     finally:
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(tz=timezone.utc)
         if result.started_at:
             result.duration_ms = int(
                 (result.finished_at - result.started_at).total_seconds() * 1000

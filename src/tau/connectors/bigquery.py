@@ -1,6 +1,8 @@
 """Google BigQuery connector."""
 
 from __future__ import annotations
+import asyncio
+from functools import partial
 from tau.connectors.base import Connector
 
 
@@ -47,8 +49,11 @@ class BigQueryConnector(Connector):
                 ]
             )
 
-        query_job = self._client.query(query, job_config=job_config, location=self.location)
-        rows = query_job.result()
+        loop = asyncio.get_event_loop()
+        query_job = await loop.run_in_executor(
+            None, partial(self._client.query, query, job_config=job_config, location=self.location)
+        )
+        rows = await loop.run_in_executor(None, query_job.result)
         return [dict(row) for row in rows]
 
     async def load(
@@ -74,22 +79,29 @@ class BigQueryConnector(Connector):
         if schema:
             job_config.schema = schema
 
-        job = self._client.load_table_from_json(data, table, job_config=job_config)
-        job.result()  # Wait for completion
+        loop = asyncio.get_event_loop()
+        job = await loop.run_in_executor(
+            None, partial(self._client.load_table_from_json, data, table, job_config=job_config)
+        )
+        await loop.run_in_executor(None, job.result)
         return len(data)
 
     async def execute(self, query: str, params: dict | None = None) -> None:
         """Execute a DDL/DML statement."""
         if not self._client:
             await self.connect()
-        job = self._client.query(query, location=self.location)
-        job.result()
+        loop = asyncio.get_event_loop()
+        job = await loop.run_in_executor(
+            None, partial(self._client.query, query, location=self.location)
+        )
+        await loop.run_in_executor(None, job.result)
 
     async def get_schema(self, table: str) -> list[dict]:
         """Get schema for a table."""
         if not self._client:
             await self.connect()
-        t = self._client.get_table(table)
+        loop = asyncio.get_event_loop()
+        t = await loop.run_in_executor(None, self._client.get_table, table)
         return [{"name": f.name, "type": f.field_type, "mode": f.mode} for f in t.schema]
 
 

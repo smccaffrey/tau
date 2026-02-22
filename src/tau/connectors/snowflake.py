@@ -1,6 +1,8 @@
 """Snowflake connector."""
 
 from __future__ import annotations
+import asyncio
+from functools import partial
 from tau.connectors.base import Connector
 
 
@@ -65,12 +67,16 @@ class SnowflakeConnector(Connector):
     async def extract(self, query: str, params: dict | None = None, **kwargs) -> list[dict]:
         if not self._conn:
             await self.connect()
-        cursor = self._conn.cursor(snowflake.connector.DictCursor)
-        try:
-            cursor.execute(query, params)
-            return cursor.fetchall()
-        finally:
-            cursor.close()
+        import snowflake.connector
+        loop = asyncio.get_event_loop()
+        def _extract():
+            cursor = self._conn.cursor(snowflake.connector.DictCursor)
+            try:
+                cursor.execute(query, params)
+                return cursor.fetchall()
+            finally:
+                cursor.close()
+        return await loop.run_in_executor(None, _extract)
 
     async def load(
         self,
@@ -82,31 +88,34 @@ class SnowflakeConnector(Connector):
         if not self._conn or not data:
             return 0
 
-        cursor = self._conn.cursor()
-        try:
-            if mode == "replace":
-                cursor.execute(f"TRUNCATE TABLE IF EXISTS {table}")
-
-            columns = list(data[0].keys())
-            col_str = ", ".join(columns)
-            placeholders = ", ".join(["%s"] * len(columns))
-
-            for record in data:
-                values = [record.get(c) for c in columns]
-                cursor.execute(f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})", values)
-
-            return len(data)
-        finally:
-            cursor.close()
+        loop = asyncio.get_event_loop()
+        def _load():
+            cursor = self._conn.cursor()
+            try:
+                if mode == "replace":
+                    cursor.execute(f"TRUNCATE TABLE IF EXISTS {table}")
+                columns = list(data[0].keys())
+                col_str = ", ".join(columns)
+                placeholders = ", ".join(["%s"] * len(columns))
+                for record in data:
+                    values = [record.get(c) for c in columns]
+                    cursor.execute(f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})", values)
+                return len(data)
+            finally:
+                cursor.close()
+        return await loop.run_in_executor(None, _load)
 
     async def execute(self, query: str, params: dict | None = None) -> None:
         if not self._conn:
             await self.connect()
-        cursor = self._conn.cursor()
-        try:
-            cursor.execute(query, params)
-        finally:
-            cursor.close()
+        loop = asyncio.get_event_loop()
+        def _execute():
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(query, params)
+            finally:
+                cursor.close()
+        await loop.run_in_executor(None, _execute)
 
     async def get_schema(self, table: str) -> list[dict]:
         return await self.extract(f"DESCRIBE TABLE {table}")

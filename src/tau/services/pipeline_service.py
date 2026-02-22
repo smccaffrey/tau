@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tau.core.config import settings
+from tau.core.config import get_settings
 from tau.models.pipeline import Pipeline
 from tau.pipeline.loader import extract_pipeline_metadata
 from tau.repositories.pipeline_repo import PipelineRepository
@@ -18,7 +18,8 @@ class PipelineService:
 
     async def deploy(self, name: str, source_code: str, description: str | None = None, tags: list[str] | None = None) -> Pipeline:
         """Deploy a pipeline by saving its source code and registering it."""
-        pipelines_dir = settings.get_pipelines_dir()
+        settings = get_settings()
+        pipelines_dir = Path(settings.pipelines_dir)
         file_path = pipelines_dir / f"{name}.py"
         file_path.write_text(source_code)
 

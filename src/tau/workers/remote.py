@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -51,7 +51,7 @@ class RemoteWorker:
             resp = await self._client.get("/health")
             resp.raise_for_status()
             self._status = "idle"
-            self._last_heartbeat = datetime.utcnow()
+            self._last_heartbeat = datetime.now(tz=timezone.utc)
             logger.info(f"[{self.worker_id}] Connected to {self.host}")
         except Exception as e:
             self._status = "offline"
@@ -149,7 +149,7 @@ class RemoteWorker:
             resp = await self._client.get("/health")
             resp.raise_for_status()
             data = resp.json()
-            self._last_heartbeat = datetime.utcnow()
+            self._last_heartbeat = datetime.now(tz=timezone.utc)
             self._status = "idle" if self._current_load == 0 else "busy"
             return {
                 "status": self._status,

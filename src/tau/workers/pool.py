@@ -72,32 +72,31 @@ class WorkerPool:
         return sum(w.current_load for w in self.all_workers)
 
     def _select_worker(self, prefer_local: bool = True) -> LocalWorker | RemoteWorker | None:
-        """Select the best worker for a run (least-loaded with capacity)."""
-        candidates = []
+        """Select the best worker for a run (least-loaded with capacity).
 
-        if prefer_local:
-            # Prefer local workers first
-            for w in self._local_workers:
-                if w.capacity > 0:
-                    candidates.append((w, w.current_load))
+        With prefer_local=True: tries local workers first, falls back to remote
+        if no local capacity. With prefer_local=False: picks globally least-loaded.
+        """
+        local_candidates = [
+            (w, w.current_load) for w in self._local_workers if w.capacity > 0
+        ]
+        remote_candidates = [
+            (w, w.current_load) for w in self._remote_workers
+            if w.status != "offline" and w.capacity > 0
+        ]
 
-        # Then remote workers
-        for w in self._remote_workers:
-            if w.status != "offline" and w.capacity > 0:
-                candidates.append((w, w.current_load))
+        if prefer_local and local_candidates:
+            # Use local if any have capacity
+            local_candidates.sort(key=lambda x: x[1])
+            return local_candidates[0][0]
 
-        # If no local preference or no local capacity, try all
-        if not candidates and not prefer_local:
-            for w in self._local_workers:
-                if w.capacity > 0:
-                    candidates.append((w, w.current_load))
-
-        if not candidates:
+        # Otherwise pick from all available (least loaded)
+        all_candidates = local_candidates + remote_candidates
+        if not all_candidates:
             return None
 
-        # Sort by load (least loaded first)
-        candidates.sort(key=lambda x: x[1])
-        return candidates[0][0]
+        all_candidates.sort(key=lambda x: x[1])
+        return all_candidates[0][0]
 
     async def dispatch(
         self,

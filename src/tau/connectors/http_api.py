@@ -119,10 +119,11 @@ class HttpApiConnector(Connector):
 
 
 def http_api(
-    url: str,
+    base_url: str = "",
+    url: str = "",
     auth: dict | None = None,
     headers: dict | None = None,
     timeout: int = 30,
 ) -> HttpApiConnector:
     """Create an HTTP API connector."""
-    return HttpApiConnector(base_url=url, auth=auth, headers=headers, timeout=timeout)
+    return HttpApiConnector(base_url=base_url or url, auth=auth, headers=headers, timeout=timeout)

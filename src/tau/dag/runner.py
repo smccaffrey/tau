@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Awaitable, Any
 
 from tau.dag.resolver import DAGResolver
@@ -67,7 +67,7 @@ class DAGRunner:
 
         result = DAGRunResult(
             status="running",
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(tz=timezone.utc),
             execution_order=groups,
         )
 
@@ -114,7 +114,7 @@ class DAGRunner:
 
             await asyncio.gather(*[_run_one(name) for name in runnable])
 
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(tz=timezone.utc)
         result.duration_ms = int(
             (result.finished_at - result.started_at).total_seconds() * 1000
         )

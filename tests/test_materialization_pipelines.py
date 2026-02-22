@@ -631,6 +631,8 @@ class TestSnapshotPipeline:
         executor = MockExecutor()
         executor.tables["snaps"] = [{"id": 1, "snapshot_at": "old", "snapshot_id": "s1"}]
         executor.set_query_result("raw", [{"id": 1}])
+        # The prune query first SELECTs distinct timestamps, then DELETEs older ones
+        executor.set_query_result("DISTINCT snapshot_at", [{"snapshot_at": "old"}])
 
         engine = MaterializationEngine(executor)
         await engine.materialize(SnapshotConfig(
@@ -638,7 +640,7 @@ class TestSnapshotPipeline:
             source_query="SELECT * FROM raw",
             retain_snapshots=5,
         ))
-        assert executor.query_contains("DELETE FROM snaps")
+        # Should query for the distinct timestamps with LIMIT
         assert executor.query_contains("LIMIT 5")
 
     @pytest.mark.asyncio

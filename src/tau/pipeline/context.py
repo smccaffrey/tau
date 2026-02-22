@@ -1,7 +1,7 @@
 """PipelineContext — the runtime context passed to every pipeline function."""
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,7 +40,7 @@ class PipelineContext:
 
     def log(self, message: str) -> None:
         """Log a message (captured in execution trace)."""
-        ts = datetime.utcnow().isoformat()
+        ts = datetime.now(tz=timezone.utc).isoformat()
         self._logs.append(f"[{ts}] {message}")
 
     def step(self, name: str) -> "StepContext":
@@ -121,14 +121,14 @@ class StepContext:
         self.trace = StepTrace(name=name)
 
     async def __aenter__(self):
-        self.trace.started_at = datetime.utcnow()
+        self.trace.started_at = datetime.now(tz=timezone.utc)
         self.trace.status = "running"
         self.ctx._steps.append(self.trace)
         self.ctx.log(f"Step started: {self.trace.name}")
         return self.trace
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.trace.finished_at = datetime.utcnow()
+        self.trace.finished_at = datetime.now(tz=timezone.utc)
         if self.trace.started_at:
             self.trace.duration_ms = int(
                 (self.trace.finished_at - self.trace.started_at).total_seconds() * 1000

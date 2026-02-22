@@ -57,13 +57,16 @@ class ClickHouseConnector(Connector):
         import json
         # ClickHouse accepts JSONEachRow format
         lines = "\n".join(json.dumps(record, default=str) for record in data)
+        insert_params = {
+            "database": self.database,
+            "user": self.user,
+            "password": self.password,
+            "query": f"INSERT INTO {table} FORMAT JSONEachRow",
+        }
         resp = await self._client.post(
             "/",
             content=lines,
-            params={
-                **self._client.params,
-                "query": f"INSERT INTO {table} FORMAT JSONEachRow",
-            },
+            params=insert_params,
         )
         resp.raise_for_status()
         return len(data)
