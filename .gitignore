@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+*.egg-info/
+tau.db
+tau.toml
+.env
+artifacts/
+pipelines/
+.ruff_cache/

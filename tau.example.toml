@@ -1,0 +1,21 @@
+# Tau Pipelines — Configuration
+# Copy to tau.toml and customize
+
+[daemon]
+host = "0.0.0.0"
+port = 8400
+workers = 4
+log_level = "info"
+
+[database]
+# SQLite (default, zero-setup)
+url = "sqlite+aiosqlite:///tau.db"
+# PostgreSQL (production)
+# url = "postgresql+asyncpg://tau:tau@localhost:5432/tau"
+
+[auth]
+api_key = "tau_dev_key"
+
+[scheduler]
+timezone = "UTC"
+max_concurrent = 10
