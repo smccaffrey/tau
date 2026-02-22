@@ -492,13 +492,87 @@ See the [`examples/`](examples/) directory:
 
 ---
 
+## Pipeline Dependencies (DAGs)
+
+Declare dependencies between pipelines with `depends_on`. Tau resolves the graph, runs independent pipelines in parallel, and skips downstream pipelines when upstream fails.
+
+```python
+@pipeline(name="extract_orders", schedule="0 4 * * *")
+async def extract_orders(ctx): ...
+
+@pipeline(name="dim_customers", depends_on=["extract_customers"])
+async def dim_customers(ctx): ...
+
+@pipeline(name="fct_orders", depends_on=["stage_orders", "dim_customers", "dim_products"])
+async def fct_orders(ctx): ...
+```
+
+```bash
+tau dag                                    # View the DAG
+tau depends fct_orders                     # Show dependencies
+tau depends fct_orders --on stage_orders --on dim_customers  # Set via CLI
+```
+
+Execution groups (run in parallel within each group):
+```
+Group 0: [extract_orders, extract_customers, extract_products]
+Group 1: [stage_orders, dim_customers, dim_products]
+Group 2: [fct_orders]
+Group 3: [report_daily_revenue]
+```
+
+---
+
+## Workers
+
+Tau runs on a single machine by default. For production, add remote workers — each one is another `taud` instance.
+
+### Single Machine (default)
+```bash
+taud                    # Starts with a local worker pool (4 concurrent)
+```
+
+### Distributed
+```bash
+# On the coordinator
+taud --port 8400
+
+# On worker machines
+taud --port 8400        # Each is a full taud instance
+
+# Register workers with the coordinator
+tau workers                               # View pool
+curl -X POST http://coordinator:8400/api/v1/workers/register \
+  -H "Authorization: Bearer $TAU_API_KEY" \
+  -d '{"worker_id":"worker-1","host":"http://w1:8400","api_key":"key","max_concurrent":4}'
+```
+
+The coordinator dispatches pipeline runs to the least-loaded worker. Remote workers use the same HTTP API the CLI uses — no special protocol.
+
+---
+
+## Web Dashboard
+
+`taud` serves a web dashboard at its root URL:
+
+```bash
+taud                    # Dashboard at http://localhost:8400/
+tau dashboard           # Opens in browser
+```
+
+Shows: pipeline status, recent runs, worker pool health, scheduled jobs. Auto-refreshes every 15 seconds.
+
+---
+
 ## Roadmap
 
 - [x] Core daemon, CLI, scheduler, executor, structured traces
 - [x] `tau create` (AI generates pipelines), `tau heal --auto` (self-healing)
 - [x] 9 warehouse connectors
 - [x] 8 materialization strategies with dialect-aware SQL
-- [ ] Distributed workers, dependency DAGs, web dashboard
+- [x] Pipeline DAGs with dependency resolution and parallel execution
+- [x] Distributed workers (local + remote `taud` instances)
+- [x] Web dashboard
 - [ ] Tau Cloud (managed hosting, multi-tenant)
 
 ---

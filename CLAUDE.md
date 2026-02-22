@@ -219,6 +219,33 @@ Pass `dialect=` to `ctx.materialize()` to get warehouse-native SQL:
 - `"mysql"` — standard SQL
 - `"duckdb"` — standard SQL
 
+## Pipeline Dependencies
+
+Declare dependencies with `depends_on`:
+
+```python
+@pipeline(name="fct_orders", depends_on=["stage_orders", "dim_customers"])
+async def fct_orders(ctx: PipelineContext): ...
+```
+
+Or set via CLI:
+```bash
+tau depends fct_orders --on stage_orders --on dim_customers
+tau dag  # View the full DAG
+```
+
+Tau resolves the graph into parallel execution groups. Pipelines with no unmet dependencies run concurrently. If upstream fails, downstream is skipped.
+
+## Workers
+
+Single machine (default): pipelines run in the daemon process with concurrency control.
+
+Distributed: register remote `taud` instances as workers. The coordinator dispatches to the least-loaded worker.
+
+```bash
+tau workers  # View worker pool status
+```
+
 ## CLI Commands You Use
 
 ```bash
@@ -255,6 +282,17 @@ tau schedule <name> --disable
 tau create "description of what you want"   # Generate pipeline from intent
 tau heal <name> [--auto]                    # Diagnose + fix failures
 
+# DAG
+tau dag                                     # View the pipeline DAG
+tau depends <name>                          # Show dependencies
+tau depends <name> --on dep1 --on dep2      # Set dependencies
+
+# Workers
+tau workers                                 # Worker pool status
+
+# Dashboard
+tau dashboard                               # Open web dashboard in browser
+
 # Daemon info
 tau status
 tau version
@@ -280,6 +318,15 @@ src/tau/
 ├── materializations/        # Table materialization engine
 │   ├── strategies.py        # Config dataclasses
 │   └── engine.py            # SQL generation + execution
+├── dag/                     # Pipeline dependency DAG
+│   ├── resolver.py          # Topological sort, cycle detection, parallel groups
+│   └── runner.py            # DAG execution with parallelism
+├── workers/                 # Worker pool (local + distributed)
+│   ├── pool.py              # WorkerPool dispatch
+│   ├── local.py             # In-process worker
+│   └── remote.py            # Remote taud worker
+├── dashboard/               # Web dashboard (served by daemon)
+│   └── app.py               # Single-page HTML dashboard
 ├── api/                     # REST API endpoints
 ├── services/                # Business logic
 ├── repositories/            # Data access
