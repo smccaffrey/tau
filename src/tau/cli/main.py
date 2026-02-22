@@ -292,6 +292,112 @@ def runs(
 
 
 @app.command()
+def create(
+    intent: str = typer.Argument(..., help="Natural language description of the pipeline"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
+    deploy_now: bool = typer.Option(False, "--deploy", help="Deploy immediately after generation"),
+    schedule: Optional[str] = typer.Option(None, "--schedule", "-s", help="Schedule if deploying"),
+):
+    """Generate a pipeline from natural language using AI."""
+    import asyncio
+
+    async def _create():
+        from tau.ai.generator import generate_pipeline
+
+        with console.status("[bold]Generating pipeline..."):
+            code = await generate_pipeline(intent)
+
+        if output:
+            Path(output).write_text(code)
+            console.print(f"[green]✓[/green] Pipeline saved to [bold]{output}[/bold]")
+        else:
+            console.print(Syntax(code, "python", theme="monokai", line_numbers=True))
+
+        if deploy_now:
+            # Extract name from generated code
+            import re
+            match = re.search(r'@pipeline\([^)]*name\s*=\s*["\']([^"\']+)["\']', code)
+            name = match.group(1) if match else "generated_pipeline"
+
+            data = {"name": name, "code": code}
+            if schedule:
+                data["schedule_cron"] = schedule
+
+            result = _api("POST", "/pipelines", json=data)
+            console.print(f"[green]✓[/green] Deployed: [bold]{result['name']}[/bold]")
+
+    asyncio.run(_create())
+
+
+@app.command()
+def heal(
+    name: str = typer.Argument(..., help="Pipeline name to diagnose/heal"),
+    auto: bool = typer.Option(False, "--auto", help="Auto-apply fix and redeploy"),
+):
+    """Diagnose a pipeline failure and suggest/apply a fix."""
+    import asyncio
+
+    async def _heal():
+        from tau.ai.generator import diagnose_failure
+
+        # Get pipeline code
+        pipe = _api("GET", f"/pipelines/{name}/code")
+        code = pipe["code"]
+
+        # Get last failed run
+        try:
+            run = _api("GET", f"/runs/{name}/last")
+        except SystemExit:
+            console.print("[red]No runs found to diagnose[/red]")
+            return
+
+        if run["status"] != "failed":
+            console.print(f"[green]Last run was {run['status']}[/green] — nothing to heal")
+            return
+
+        with console.status("[bold]Diagnosing failure..."):
+            diagnosis = await diagnose_failure(
+                pipeline_name=name,
+                pipeline_code=code,
+                error=run.get("error", ""),
+                trace=run.get("trace"),
+                logs=run.get("logs"),  # Fixed: was missing from RunResponse
+            )
+
+        console.print(f"\n[bold]Diagnosis:[/bold] {diagnosis.get('diagnosis', 'Unknown')}")
+        console.print(f"[bold]Root Cause:[/bold] {diagnosis.get('root_cause', 'unknown')}")
+        console.print(f"[bold]Severity:[/bold] {diagnosis.get('severity', 'unknown')}")
+        console.print(f"[bold]Confidence:[/bold] {diagnosis.get('confidence', 0):.0%}")
+
+        if diagnosis.get("fix_description"):
+            console.print(f"\n[bold]Fix:[/bold] {diagnosis['fix_description']}")
+
+        if diagnosis.get("fixed_code"):
+            console.print("\n[bold]Fixed Code:[/bold]")
+            console.print(Syntax(diagnosis["fixed_code"], "python", theme="monokai"))
+
+            if auto:
+                result = _api("POST", "/pipelines", json={
+                    "name": name,
+                    "code": diagnosis["fixed_code"],
+                })
+                console.print(f"\n[green]✓[/green] Fix deployed for [bold]{name}[/bold]")
+
+                # Run it to verify
+                console.print("Running healed pipeline...")
+                run_result = _api("POST", f"/pipelines/{name}/run")
+                status = run_result["status"]
+                color = "green" if status == "success" else "red"
+                console.print(f"[{color}]●[/{color}] Result: {status}")
+            else:
+                console.print("\n[dim]Run with --auto to apply fix automatically[/dim]")
+        else:
+            console.print("\n[yellow]Could not generate an automatic fix[/yellow]")
+
+    asyncio.run(_heal())
+
+
+@app.command()
 def version():
     """Show Tau version."""
     console.print(f"tau-pipelines v{__version__}")

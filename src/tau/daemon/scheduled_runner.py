@@ -74,6 +74,10 @@ async def scheduled_run(pipeline_name: str):
             last_run_status=result.status,
         )
 
+        # Fire webhooks
+        from tau.daemon.webhooks import notify_run_complete
+        await notify_run_complete(pipeline_name, run_id, result.status, result.error)
+
         if result.status == RunStatus.SUCCESS.value:
             logger.info(f"Scheduled run succeeded: {pipeline_name} ({result.duration_ms}ms)")
         else:
