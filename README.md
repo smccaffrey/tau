@@ -5,8 +5,12 @@
 Tau is a daemon + CLI for building, scheduling, and running data pipelines. Install it, start it, write pipelines — that's it. The only code you write is pipeline files.
 
 ```bash
-pip install tau-pipelines
-taud                                          # start the daemon
+curl -fsSL https://raw.githubusercontent.com/smccaffrey/tau/main/install.sh | bash
+```
+
+One command. Installs Tau, starts the daemon, sets up Claude Code integration. Then your AI starts writing pipelines.
+
+```bash
 tau deploy examples/hello_pipeline.py         # deploy a pipeline
 tau run hello_world                           # run it
 tau inspect hello_world --last-run            # structured JSON result
@@ -34,20 +38,24 @@ Tau flips this: **it's a tool that AI agents operate.** An AI writes your pipeli
 
 ## Install
 
+### One-line setup (recommended)
+
 ```bash
-# Core (includes SQLite, HTTP, ClickHouse connectors)
-pip install tau-pipelines
-
-# With warehouse connectors
-pip install tau-pipelines[postgres]
-pip install tau-pipelines[bigquery]
-pip install tau-pipelines[snowflake]
-pip install tau-pipelines[motherduck]
-pip install tau-pipelines[mysql]
-
-# Everything
-pip install tau-pipelines[all]
+curl -fsSL https://raw.githubusercontent.com/smccaffrey/tau/main/install.sh | bash
 ```
+
+This installs Tau, generates an API key, starts the daemon, and downloads `CLAUDE.md` for Claude Code integration. You're ready to go.
+
+### Manual install
+
+```bash
+pip install tau-pipelines        # Core
+pip install tau-pipelines[all]   # All warehouse connectors
+
+taud                             # Start the daemon
+```
+
+Connector extras: `[postgres]`, `[bigquery]`, `[snowflake]`, `[motherduck]`, `[mysql]`.
 
 Requires Python 3.12+.
 
@@ -55,7 +63,7 @@ Requires Python 3.12+.
 
 ## Quick Start
 
-### 1. Start the daemon
+### 1. Start the daemon (done automatically by install script)
 
 ```bash
 taud
