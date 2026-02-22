@@ -1,4 +1,4 @@
-"""Tau daemon — FastAPI app with built-in scheduler."""
+"""Tau daemon — FastAPI app with built-in scheduler, worker pool, and dashboard."""
 
 import logging
 import uvicorn
@@ -9,7 +9,10 @@ from tau import __version__
 from tau.core.config import get_settings
 from tau.core.database import init_engine, create_tables
 from tau.api.router import api_router
+from tau.dashboard.app import router as dashboard_router
 from tau.daemon.scheduler import start_scheduler, stop_scheduler, list_jobs
+from tau.workers.pool import WorkerPool
+from tau.api.workers import set_pool
 
 logger = logging.getLogger("tau")
 
@@ -24,6 +27,12 @@ async def lifespan(app: FastAPI):
     await create_tables()
     logger.info(f"Database initialized: {settings.database_url}")
 
+    # Init worker pool
+    pool = WorkerPool()
+    pool.add_local(max_concurrent=settings.max_concurrent)
+    set_pool(pool)
+    logger.info(f"Worker pool initialized (local, max_concurrent={settings.max_concurrent})")
+
     # Start scheduler
     start_scheduler()
     logger.info("Scheduler started")
@@ -31,6 +40,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await pool.disconnect_remotes()
     stop_scheduler()
     logger.info("Tau daemon stopped")
 
@@ -44,13 +54,17 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router)
+    app.include_router(dashboard_router)
 
     @app.get("/health")
     async def health():
+        from tau.api.workers import get_pool
+        pool = get_pool()
         return {
             "status": "ok",
             "version": __version__,
             "scheduler_jobs": list_jobs(),
+            "workers": pool.info() if pool else None,
         }
 
     return app
@@ -81,6 +95,7 @@ def main():
             host = args[i + 1]
 
     logger.info(f"Starting Tau daemon v{__version__} on {host}:{port}")
+    logger.info(f"Dashboard: http://{host}:{port}/")
 
     app = create_app()
     uvicorn.run(app, host=host, port=port, log_level=settings.log_level)

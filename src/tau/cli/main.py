@@ -397,6 +397,105 @@ def heal(
     asyncio.run(_heal())
 
 
+# ─── DAG Commands ───
+
+@app.command()
+def dag():
+    """Show the pipeline dependency DAG."""
+    result = _api("GET", "/dag")
+
+    if not result.get("nodes"):
+        console.print("[dim]No dependencies defined[/dim]")
+        return
+
+    console.print("[bold]Pipeline DAG[/bold]\n")
+
+    groups = result.get("groups", [])
+    for i, group in enumerate(groups):
+        level = f"Level {i}"
+        nodes = "  ".join(f"[cyan]{n}[/cyan]" for n in group)
+        console.print(f"  {level}: {nodes}")
+
+    if result.get("edges"):
+        console.print(f"\n  [dim]{len(result['edges'])} dependencies, {len(result['nodes'])} pipelines[/dim]")
+
+
+@app.command()
+def depends(
+    name: str = typer.Argument(..., help="Pipeline name"),
+    on: list[str] = typer.Option([], "--on", help="Upstream dependencies (repeatable)"),
+):
+    """Set pipeline dependencies (e.g. tau depends fct_orders --on dim_customers --on stg_orders)."""
+    if not on:
+        # Show current dependencies
+        result = _api("GET", f"/dag/{name}/upstream")
+        upstream = result.get("upstream", [])
+        if upstream:
+            console.print(f"[bold]{name}[/bold] depends on: {', '.join(upstream)}")
+        else:
+            console.print(f"[bold]{name}[/bold] has no dependencies")
+
+        result = _api("GET", f"/dag/{name}/downstream")
+        downstream = result.get("downstream", [])
+        if downstream:
+            console.print(f"  Downstream: {', '.join(downstream)}")
+        return
+
+    result = _api("POST", "/dag/dependencies", json={
+        "pipeline": name,
+        "depends_on": on,
+    })
+    console.print(f"[green]✓[/green] {name} depends on: {', '.join(on)}")
+
+
+# ─── Worker Commands ───
+
+@app.command()
+def workers():
+    """Show worker pool status."""
+    result = _api("GET", "/workers")
+    workers_list = result.get("workers", [])
+
+    if not workers_list:
+        console.print("[dim]No workers registered[/dim]")
+        return
+
+    table = Table(title="Workers")
+    table.add_column("ID", style="bold")
+    table.add_column("Type")
+    table.add_column("Status")
+    table.add_column("Load")
+    table.add_column("Host")
+
+    for w in workers_list:
+        status = w["status"]
+        color = "green" if status == "idle" else "yellow" if status == "busy" else "red"
+        table.add_row(
+            w["worker_id"],
+            w["type"],
+            f"[{color}]{status}[/{color}]",
+            f"{w['current_load']}/{w['max_concurrent']}",
+            w.get("host", "local"),
+        )
+
+    console.print(table)
+    console.print(f"\n  Total capacity: {result.get('total_capacity', 0)}")
+    console.print(f"  Current load: {result.get('total_load', 0)}")
+
+
+@app.command()
+def dashboard():
+    """Open the web dashboard URL."""
+    settings = get_client_settings()
+    url = f"{settings.host}/"
+    console.print(f"Dashboard: [cyan]{url}[/cyan]")
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
 @app.command()
 def version():
     """Show Tau version."""

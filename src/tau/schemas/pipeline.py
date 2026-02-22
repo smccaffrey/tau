@@ -10,6 +10,7 @@ class PipelineCreate(BaseModel):
     code: str
     filename: str | None = None
     tags: list[str] | None = None
+    depends_on: list[str] | None = None
     schedule_cron: str | None = None
     schedule_interval: int | None = None
     retry_count: int = 3
@@ -33,6 +34,7 @@ class PipelineResponse(BaseModel):
     description: str | None
     filename: str | None
     tags: list[str] | None
+    depends_on: list[str] | None = None
     status: str
     schedule_cron: str | None
     schedule_interval: int | None

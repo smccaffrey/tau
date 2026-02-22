@@ -38,6 +38,14 @@ class RunRepository:
         )
         return list(result.scalars().all())
 
+    async def list_recent(self, limit: int = 20) -> list[PipelineRun]:
+        result = await self.session.execute(
+            select(PipelineRun)
+            .order_by(PipelineRun.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def list_errors(self, limit: int = 20) -> list[PipelineRun]:
         result = await self.session.execute(
             select(PipelineRun)

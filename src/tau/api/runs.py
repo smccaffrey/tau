@@ -11,6 +11,18 @@ from tau.schemas.run import RunResponse, RunListResponse, RunLogsResponse
 router = APIRouter(prefix="/runs", tags=["runs"])
 
 
+@router.get("", response_model=RunListResponse)
+async def list_all_runs(
+    limit: int = 20,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_api_key),
+):
+    """List recent runs across all pipelines."""
+    repo = RunRepository(session)
+    runs = await repo.list_recent(limit=limit)
+    return RunListResponse(runs=runs, total=len(runs))
+
+
 @router.get("/errors", response_model=RunListResponse)
 async def list_errors(
     limit: int = 20,
