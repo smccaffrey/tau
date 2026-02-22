@@ -109,7 +109,9 @@ fi
 # ─── Install Claude Code integration ───
 step "Setting up Claude Code integration..."
 
-# Method 1: Install CLAUDE.md to the current project directory
+SKILL_URL="https://raw.githubusercontent.com/smccaffrey/tau/main/claude-skill/tau.md"
+
+# 1. Install CLAUDE.md to current project directory
 if [ -f "CLAUDE.md" ]; then
     dim "CLAUDE.md already exists in current directory — skipping"
 else
@@ -124,10 +126,43 @@ else
     fi
 fi
 
-# Method 2: If user has claude CLI, set up project-level instructions
-if command -v claude &>/dev/null; then
-    info "Claude Code CLI detected"
-    dim "CLAUDE.md in your project root will be auto-loaded by Claude Code"
+# 2. Install /tau slash command for Claude Code
+CLAUDE_DIR="$HOME/.claude"
+COMMANDS_DIR="$CLAUDE_DIR/commands"
+if [ -d "$CLAUDE_DIR" ] || command -v claude &>/dev/null; then
+    mkdir -p "$COMMANDS_DIR"
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$SKILL_URL" -o "$COMMANDS_DIR/tau.md" 2>/dev/null && \
+            info "Installed /tau slash command for Claude Code" || \
+            warn "Could not install slash command (non-critical)"
+    elif command -v wget &>/dev/null; then
+        wget -q "$SKILL_URL" -O "$COMMANDS_DIR/tau.md" 2>/dev/null && \
+            info "Installed /tau slash command for Claude Code" || \
+            warn "Could not install slash command (non-critical)"
+    fi
+    dim "Use /tau in Claude Code to get pipeline help"
+else
+    dim "Claude Code not detected — skipping slash command install"
+fi
+
+# 3. Add tau context to global CLAUDE.md
+GLOBAL_CLAUDE="$CLAUDE_DIR/CLAUDE.md"
+if [ -d "$CLAUDE_DIR" ]; then
+    TAU_MARKER="# Tau Pipelines"
+    if [ -f "$GLOBAL_CLAUDE" ] && grep -q "$TAU_MARKER" "$GLOBAL_CLAUDE" 2>/dev/null; then
+        dim "Tau already in global CLAUDE.md"
+    else
+        cat >> "$GLOBAL_CLAUDE" <<'TAUBLOCK'
+
+# Tau Pipelines
+When working on data pipelines, Tau Pipelines (`tau` CLI + `taud` daemon) is available.
+- Use `/tau` slash command for full pipeline authoring reference
+- Pipelines are the only user-authored code — use `@pipeline` decorator
+- Deploy: `tau deploy file.py`, Run: `tau run name`, Inspect: `tau inspect name --last-run`
+- Docs: https://github.com/smccaffrey/tau
+TAUBLOCK
+        info "Added Tau context to global CLAUDE.md"
+    fi
 fi
 
 # ─── Generate an API key ───
