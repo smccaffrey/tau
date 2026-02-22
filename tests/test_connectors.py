@@ -30,6 +30,54 @@ class TestConnectorFactories:
         assert conn.prefix == "data"
         assert conn.aws_key == "key"
 
+    def test_bigquery_factory(self):
+        from tau.connectors.bigquery import bigquery, BigQueryConnector
+        conn = bigquery(project="my-project", location="EU")
+        assert isinstance(conn, BigQueryConnector)
+        assert conn.project == "my-project"
+        assert conn.location == "EU"
+
+    def test_motherduck_factory(self):
+        from tau.connectors.motherduck import motherduck, duckdb_local, MotherDuckConnector
+        conn = motherduck(token="md_token", database="analytics")
+        assert isinstance(conn, MotherDuckConnector)
+        assert conn.token == "md_token"
+        assert conn.database == "analytics"
+        assert conn.local is False
+
+    def test_duckdb_local_factory(self):
+        from tau.connectors.motherduck import duckdb_local, MotherDuckConnector
+        conn = duckdb_local(database=":memory:")
+        assert isinstance(conn, MotherDuckConnector)
+        assert conn.local is True
+
+    def test_snowflake_factory(self):
+        from tau.connectors.snowflake import snowflake, SnowflakeConnector
+        conn = snowflake(account="abc123", user="admin", password="pw", warehouse="COMPUTE_WH")
+        assert isinstance(conn, SnowflakeConnector)
+        assert conn.account == "abc123"
+        assert conn.warehouse == "COMPUTE_WH"
+
+    def test_redshift_factory(self):
+        from tau.connectors.redshift import redshift, RedshiftConnector
+        conn = redshift(host="cluster.abc.us-east-1.redshift.amazonaws.com", database="dev", user="admin", password="pw")
+        assert isinstance(conn, RedshiftConnector)
+        assert conn.port == 5439
+
+    def test_clickhouse_factory(self):
+        from tau.connectors.clickhouse import clickhouse, ClickHouseConnector
+        conn = clickhouse(host="ch.example.com", port=8443, secure=True, database="analytics")
+        assert isinstance(conn, ClickHouseConnector)
+        assert conn.secure is True
+        assert conn.database == "analytics"
+
+    def test_mysql_factory(self):
+        from tau.connectors.mysql import mysql, MySQLConnector
+        conn = mysql(host="db.example.com", database="app", user="root", password="pw")
+        assert isinstance(conn, MySQLConnector)
+        assert conn.port == 3306
+        assert conn.database == "app"
+
 
 class TestHttpApiConnector:
     @pytest.mark.asyncio
