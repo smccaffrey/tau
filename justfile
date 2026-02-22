@@ -10,7 +10,7 @@ default:
 
 # Install all dependencies (dev + all connectors)
 install:
-    uv sync --all-extras
+    uv sync --python ">=3.12" --all-extras
 
 # Start the daemon (dev mode, port 8400)
 dev:

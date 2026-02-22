@@ -31,8 +31,22 @@ echo -e "  ${DIM}AI-native data pipeline orchestration${NC}"
 echo -e "  ${DIM}v${VERSION}${NC}"
 echo -e ""
 
-# ─── Check Python ───
-step "Checking Python..."
+# ─── Ensure uv is installed ───
+step "Checking for uv..."
+
+if ! command -v uv &>/dev/null; then
+    info "Installing uv (fast Python package manager)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    if ! command -v uv &>/dev/null; then
+        echo -e "\n${AMBER}  ✗ Failed to install uv. Install manually: ${CYAN}https://docs.astral.sh/uv/${NC}"
+        exit 1
+    fi
+fi
+info "uv $(uv --version 2>/dev/null | awk '{print $2}') found"
+
+# ─── Ensure Python 3.12+ via uv ───
+step "Checking Python 3.12+..."
 
 PYTHON=""
 for cmd in python3 python; do
@@ -48,62 +62,46 @@ for cmd in python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    echo -e "\n${AMBER}  ✗ Python 3.12+ is required but not found.${NC}"
-    echo -e "  Install it: ${CYAN}https://www.python.org/downloads/${NC}"
-    exit 1
-fi
-
-info "Python $($PYTHON --version 2>&1 | awk '{print $2}') found ($PYTHON)"
-
-# ─── Check for uv or pip ───
-step "Checking package manager..."
-
-INSTALLER=""
-if command -v uv &>/dev/null; then
-    INSTALLER="uv"
-    info "uv found — using uv for installation"
-elif command -v pipx &>/dev/null; then
-    INSTALLER="pipx"
-    info "pipx found — using pipx for installation"
+    info "Python 3.12+ not found — installing via uv..."
+    uv python install 3.12 2>/dev/null
+    # uv will manage the python for us via tool install
+    info "Python 3.12 installed via uv"
 else
-    INSTALLER="pip"
-    info "Using pip for installation"
+    info "Python $($PYTHON --version 2>&1 | awk '{print $2}') found"
 fi
 
 # ─── Install tau-pipelines ───
 step "Installing tau-pipelines..."
 
-case "$INSTALLER" in
-    uv)
-        uv pip install tau-pipelines 2>/dev/null || uv pip install --system tau-pipelines 2>/dev/null || {
-            # If not in a venv, use uv tool install
-            uv tool install tau-pipelines 2>/dev/null || uv pip install --break-system-packages tau-pipelines
-        }
-        ;;
-    pipx)
-        pipx install tau-pipelines
-        ;;
-    pip)
-        $PYTHON -m pip install --quiet tau-pipelines 2>/dev/null || \
+# Use uv tool install — creates an isolated venv with the right Python automatically
+# This handles Python version, venv creation, and PATH in one shot
+uv tool install --python ">=3.12" tau-pipelines 2>/dev/null || \
+uv tool install --python ">=3.12" tau-pipelines --force 2>/dev/null || {
+    # Fallback: try pip in a uv-managed venv
+    warn "uv tool install failed — trying pip fallback..."
+    if [ -n "$PYTHON" ]; then
         $PYTHON -m pip install --quiet --user tau-pipelines 2>/dev/null || \
-        $PYTHON -m pip install --quiet --break-system-packages tau-pipelines
-        ;;
-esac
+        $PYTHON -m pip install --quiet tau-pipelines
+    else
+        uv pip install --python ">=3.12" --system tau-pipelines 2>/dev/null || {
+            echo -e "\n${AMBER}  ✗ Installation failed. Try manually:${NC}"
+            echo -e "  ${CYAN}uv tool install --python '>=3.12' tau-pipelines${NC}"
+            exit 1
+        }
+    fi
+}
+
+# Ensure uv tool bin is on PATH
+export PATH="$HOME/.local/bin:$PATH"
 
 # Verify installation
 if command -v tau &>/dev/null; then
-    info "tau CLI installed"
+    info "tau CLI installed ($(tau version 2>/dev/null || echo 'ok'))"
 elif command -v taud &>/dev/null; then
     info "tau installed (may need to add to PATH)"
 else
-    # Check common locations
-    for dir in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
-        if [ -f "$dir/tau" ]; then
-            export PATH="$dir:$PATH"
-            info "tau found at $dir (add to PATH: export PATH=\"$dir:\$PATH\")"
-            break
-        fi
-    done
+    warn "tau not found on PATH — add ~/.local/bin to your PATH"
+    dim "export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
 # ─── Install Claude Code integration ───
@@ -168,7 +166,7 @@ fi
 # ─── Generate an API key ───
 step "Generating API key..."
 
-TAU_API_KEY="tau_sk_$(openssl rand -hex 16 2>/dev/null || $PYTHON -c 'import secrets; print(secrets.token_hex(16))')"
+TAU_API_KEY="tau_sk_$(openssl rand -hex 16 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(16))' 2>/dev/null || uv run python -c 'import secrets; print(secrets.token_hex(16))')"
 info "Generated: ${DIM}${TAU_API_KEY}${NC}"
 
 # ─── Create default config ───
@@ -218,6 +216,7 @@ fi
 
 ENV_BLOCK='
 # Tau Pipelines
+export PATH="$HOME/.local/bin:$PATH"
 export TAU_HOST="http://localhost:8400"
 export TAU_API_KEY="'"$TAU_API_KEY"'"'
 
