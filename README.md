@@ -1,38 +1,56 @@
 # Tau
 
-**AI-native data pipeline orchestration.**
+**An embedded data orchestrator for AI systems.**
 
-Tau is a daemon + CLI for building, scheduling, and running data pipelines. Install it, start it, write pipelines — that's it. The only code you write is pipeline files.
+Tau is a lightweight daemon that gives any AI agent — coding assistants, autonomous agents, CI/CD pipelines — the ability to build, deploy, and operate data pipelines. Locally, it's an embedded orchestrator running on your laptop. In production, it's a full-blown pipeline platform.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/smccaffrey/tau/main/install.sh | bash
 ```
 
-One command. Installs Tau, starts the daemon, sets up Claude Code integration. Then your AI starts writing pipelines.
+One command. The daemon starts, the CLI is ready, and your AI can immediately begin orchestrating data.
 
 ```bash
-tau deploy examples/hello_pipeline.py         # deploy a pipeline
-tau run hello_world                           # run it
-tau inspect hello_world --last-run            # structured JSON result
+tau deploy pipeline.py        # AI deploys a pipeline
+tau run my_pipeline           # AI triggers execution
+tau inspect my_pipeline       # AI reads structured JSON result
+tau heal my_pipeline --auto   # AI diagnoses and fixes failures
 ```
-
-Think of it like Airflow, but you only write DAGs (pipelines) and everything else is handled.
 
 ---
 
-## Why Tau?
+## What Makes Tau Different
 
-Existing orchestrators (Airflow, Dagster, Prefect) require you to manage infrastructure, write boilerplate, and babysit runs. AI integration is an afterthought.
+Every existing orchestrator — Airflow, Dagster, Prefect — was built for humans to configure and operate. AI integration is bolted on.
 
-Tau flips this: **it's a tool that AI agents operate.** An AI writes your pipelines, deploys them, monitors runs, and fixes failures — all through a CLI that returns structured JSON.
+Tau is built the other way around. **The AI is the operator.**
 
-- **Zero boilerplate** — write pipeline logic, nothing else
-- **Daemon architecture** — `taud` runs in the background with a built-in scheduler
-- **CLI-first** — every operation is one command, returns machine-readable JSON
-- **Local → Cloud** — same `tau` commands work against localhost or a remote instance
-- **9 warehouse connectors** — Postgres, BigQuery, Snowflake, MotherDuck, Redshift, ClickHouse, MySQL, HTTP APIs, S3
-- **8 materialization strategies** — full refresh, incremental, partitioned, SCD Type 1/2, snapshot, append-only, views
-- **Self-healing** — `tau heal --auto` diagnoses failures and applies fixes
+- **Every CLI command returns structured JSON** — no parsing HTML dashboards or log files
+- **The entire interface is text in, text out** — perfect for LLM tool use
+- **Pipelines are the only authored code** — the AI writes a Python file and deploys it. That's the whole workflow.
+- **Self-healing is native** — `tau heal --auto` gives the AI a structured error trace it can reason about and fix
+- **Local and cloud are the same interface** — `TAU_HOST=localhost` on your laptop, `TAU_HOST=https://tau.company.com` in production. Same commands, same pipeline files.
+
+### On Your Laptop
+
+Tau runs as a background daemon (`taud`) with zero configuration. SQLite for metadata, local executor, built-in scheduler. It's like having a data engineering team embedded in your terminal — your AI writes pipelines, Tau runs them, and you get results.
+
+```bash
+taud                          # Starts in the background, port 8400
+tau deploy my_etl.py          # AI deploys
+tau run my_etl                # Runs locally
+```
+
+### In Production
+
+Point at a remote instance. Same CLI, same pipelines, full platform — PostgreSQL metadata, distributed workers, API authentication, web dashboard.
+
+```bash
+export TAU_HOST=https://tau.mycompany.com
+export TAU_API_KEY=tau_sk_prod_...
+tau deploy my_etl.py          # Deploys to production
+tau run my_etl                # Runs on remote workers
+```
 
 ---
 
@@ -44,7 +62,7 @@ Tau flips this: **it's a tool that AI agents operate.** An AI writes your pipeli
 curl -fsSL https://raw.githubusercontent.com/smccaffrey/tau/main/install.sh | bash
 ```
 
-This installs Tau, generates an API key, starts the daemon, and downloads `CLAUDE.md` for Claude Code integration. You're ready to go.
+Installs Tau via `uv`, generates an API key, starts the daemon, and sets up Claude Code integration. Ready in 30 seconds.
 
 ### Manual install
 
@@ -63,17 +81,17 @@ Requires Python 3.12+.
 
 ## Quick Start
 
-### 1. Start the daemon (done automatically by install script)
+### 1. Start the daemon
 
 ```bash
 taud
 ```
 
-Starts on port 8400 with a SQLite database. Zero configuration required.
+Zero configuration. SQLite database, local executor, port 8400.
 
 ### 2. Write a pipeline
 
-Pipelines are Python files with a `@pipeline` decorator. This is the only code you write:
+Pipelines are Python files with a `@pipeline` decorator. This is the only code anyone — human or AI — writes:
 
 ```python
 # my_pipeline.py
@@ -91,7 +109,6 @@ async def hello_world(ctx: PipelineContext):
     ctx.log(f"Extracted {len(data)} records")
 
     transformed = [{"id": r["id"], "name": r["name"].upper()} for r in data]
-    assert len(transformed) > 0
     ctx.log("All checks passed ✓")
 
     return {"records_processed": len(transformed)}
@@ -114,9 +131,34 @@ tau schedule hello_world --every 3600   # Every hour
 
 ---
 
+## The AI Workflow
+
+This is how Tau is meant to be used. A human says what they want. An AI does the rest.
+
+```
+Human: "Sync our Stripe payments into the warehouse daily"
+
+AI:
+  1. Writes stripe_payments.py with @pipeline decorator
+  2. tau deploy stripe_payments.py --schedule "0 6 * * *"
+  3. Monitors: tau inspect stripe_payments --last-run
+
+Pipeline fails at 2am:
+  → Tau captures structured error trace (JSON)
+  → AI reads it: tau inspect stripe_payments --last-run
+  → AI diagnoses: schema drift, new column in source
+  → AI writes fix, redeploys: tau deploy stripe_payments.py
+  → Next run succeeds
+  → Human sleeps through the whole thing
+```
+
+The AI never touches daemon code, scheduler config, or infrastructure. It writes pipeline files and talks to the CLI. That's the entire surface area.
+
+---
+
 ## Pipelines
 
-Pipelines are the only thing you write. Everything else — the daemon, scheduler, executor, metadata store, API — is handled by Tau.
+Pipelines are the only authored code in the system. Everything else — the daemon, scheduler, executor, metadata store, API — is Tau infrastructure.
 
 ### Pipeline Context
 
@@ -126,7 +168,7 @@ Every pipeline receives a `PipelineContext`:
 ctx.log("message")                     # Structured logging
 ctx.step("extract")                    # Named execution step (with timing + row counts)
 ctx.secret("API_KEY")                  # Access secrets (env vars)
-ctx.materialize(config, connector)     # Materialize a table (see below)
+ctx.materialize(config, connector)     # Materialize a table
 ctx.last_successful_run                # Timestamp of last success
 ctx.run_id                             # Current run ID
 ctx.params                             # Parameters passed to this run
@@ -153,17 +195,17 @@ async def etl_orders(ctx: PipelineContext):
         await load_to_warehouse(cleaned)
 ```
 
-Each step is captured in the execution trace with timing, row counts, and errors — all as structured JSON.
+Every step is captured as structured JSON — timing, row counts, errors — readable by any AI system.
 
 ---
 
 ## Materialization Strategies
 
-Tau has a built-in materialization engine for SQL-capable connectors. Instead of writing raw SQL for table management, declare *what* you want and Tau generates the right SQL for your warehouse dialect.
+Tau has a built-in materialization engine for SQL-capable connectors. Declare *what* you want and Tau generates the right SQL for your warehouse dialect.
 
 ### Full Refresh
 
-Drop and recreate the table on every run. Best for small dimension tables.
+Drop and recreate the table on every run.
 
 ```python
 from tau.materializations import FullRefreshConfig
@@ -179,7 +221,7 @@ result = await ctx.materialize(config, connector=warehouse)
 
 ### Incremental
 
-Merge new/changed rows into an existing table. Supports merge, delete+insert, and insert_overwrite strategies.
+Merge new/changed rows. Supports merge, delete+insert, and insert_overwrite.
 
 ```python
 from tau.materializations import IncrementalConfig
@@ -189,13 +231,13 @@ config = IncrementalConfig(
     source_query="SELECT * FROM raw.orders",
     unique_key="order_id",
     incremental_column="updated_at",
-    incremental_strategy="merge",  # merge | delete+insert | insert_overwrite
+    incremental_strategy="merge",
 )
 ```
 
 ### Partitioned
 
-Partition-aware incremental with native support for BigQuery `PARTITION BY` / `CLUSTER BY` and ClickHouse `MergeTree()`. Auto-expires old partitions.
+Partition-aware incremental with native BigQuery `PARTITION BY` / `CLUSTER BY` and ClickHouse `MergeTree()`.
 
 ```python
 from tau.materializations import PartitionedConfig
@@ -213,7 +255,7 @@ config = PartitionedConfig(
 
 ### SCD Type 1
 
-Overwrite changed values in place. Tracks `updated_at` automatically.
+Overwrite changed values in place.
 
 ```python
 from tau.materializations import SCDType1Config
@@ -228,7 +270,7 @@ config = SCDType1Config(
 
 ### SCD Type 2
 
-Full history tracking with `valid_from`/`valid_to`/`is_current`. Hash-based change detection. Handles hard deletes.
+Full history tracking with `valid_from`/`valid_to`/`is_current`. Hash-based change detection.
 
 ```python
 from tau.materializations import SCDType2Config
@@ -242,19 +284,9 @@ config = SCDType2Config(
 )
 ```
 
-Query the result:
-```sql
--- Current state
-SELECT * FROM analytics.dim_customers WHERE is_current = TRUE
-
--- Point-in-time
-SELECT * FROM analytics.dim_customers
-WHERE valid_from <= '2026-01-15' AND (valid_to IS NULL OR valid_to > '2026-01-15')
-```
-
 ### Snapshot
 
-Append a full copy of the data with a timestamp on each run. Optional retention pruning.
+Point-in-time copy with optional retention pruning.
 
 ```python
 from tau.materializations import SnapshotConfig
@@ -262,13 +294,13 @@ from tau.materializations import SnapshotConfig
 config = SnapshotConfig(
     target_table="analytics.balance_snapshots",
     source_query="SELECT * FROM raw.accounts WHERE is_active = true",
-    retain_snapshots=30,  # Keep last 30 snapshots, prune older
+    retain_snapshots=30,
 )
 ```
 
 ### Append Only
 
-Insert-only, no updates. For immutable event logs and audit trails.
+Insert-only. For immutable event logs and audit trails.
 
 ```python
 from tau.materializations import MaterializationConfig, MaterializationType
@@ -282,7 +314,7 @@ config = MaterializationConfig(
 
 ### View
 
-Create or replace a SQL view. Zero storage — just a query alias.
+SQL view. Zero storage.
 
 ```python
 config = MaterializationConfig(
@@ -296,7 +328,7 @@ config = MaterializationConfig(
 
 ## Connectors
 
-Connect to any data source or warehouse. All connectors follow the same interface:
+Connect to any data source or warehouse. Uniform interface across all connectors:
 
 ```python
 async with connector:
@@ -339,6 +371,8 @@ async def api_to_warehouse(ctx: PipelineContext):
 
 ## CLI Reference
 
+Every command returns structured JSON. Every command is one line. Designed for AI tool use.
+
 ```bash
 # Pipeline lifecycle
 tau deploy <file> [--schedule "cron"] [--name override]
@@ -351,7 +385,7 @@ tau code <name>
 tau run <name> [--params '{"key": "value"}']
 tau runs <name> [--last 10]
 
-# Inspection (returns structured JSON)
+# Inspection (structured JSON — the AI reads this)
 tau inspect <name> --last-run
 tau logs <name> [--run <run_id>]
 tau errors [--limit 20]
@@ -361,9 +395,20 @@ tau schedule <name> "0 6 * * *"
 tau schedule <name> --every 3600
 tau schedule <name> --disable
 
-# AI assistance
+# AI-powered
 tau create "load Stripe payments into BigQuery daily"
 tau heal <name> [--auto]
+
+# DAG
+tau dag
+tau depends <name>
+tau depends <name> --on dep1 --on dep2
+
+# Workers
+tau workers
+
+# Dashboard
+tau dashboard
 
 # Daemon
 tau status
@@ -373,54 +418,89 @@ taud [--port 8400] [--host 0.0.0.0]
 
 ---
 
-## Local → Cloud
+## Pipeline Dependencies (DAGs)
 
-The CLI talks to the daemon over HTTP. Point it at any Tau instance:
+Declare dependencies with `depends_on`. Tau resolves the graph, runs independent pipelines in parallel, and skips downstream when upstream fails.
 
-```bash
-# Local development (default)
-tau deploy pipeline.py && tau run my_pipeline
+```python
+@pipeline(name="extract_orders", schedule="0 4 * * *")
+async def extract_orders(ctx): ...
 
-# Production
-export TAU_HOST=https://tau.mycompany.com
-export TAU_API_KEY=tau_sk_prod_...
-tau deploy pipeline.py && tau run my_pipeline
+@pipeline(name="dim_customers", depends_on=["extract_customers"])
+async def dim_customers(ctx): ...
+
+@pipeline(name="fct_orders", depends_on=["stage_orders", "dim_customers", "dim_products"])
+async def fct_orders(ctx): ...
 ```
 
-Same commands, same pipeline files, different target.
+```bash
+tau dag                                    # View the DAG
+tau depends fct_orders                     # Show dependencies
+```
 
 ---
 
-## AI Agent Integration
+## Workers
 
-Tau is designed to be called by AI coding agents (Claude, GPT, Cursor, etc.). The workflow:
+### Laptop (default)
 
-1. **Human describes what they want** — "load Stripe payments into our warehouse daily"
-2. **AI writes a pipeline file** — using `@pipeline`, connectors, and materializations
-3. **AI deploys it** — `tau deploy stripe_payments.py --schedule "0 6 * * *"`
-4. **AI monitors it** — `tau inspect stripe_payments --last-run`
-5. **AI fixes failures** — `tau heal stripe_payments --auto`
+Single machine, background daemon, local executor. Your AI's embedded data engineer.
 
-The AI never needs to touch daemon code, scheduler config, or infrastructure. It only writes pipeline files and uses the CLI.
+```bash
+taud                    # Starts with local worker pool
+```
 
-### Self-Healing
+### Production (distributed)
+
+Multiple `taud` instances, coordinated dispatch, least-loaded routing.
+
+```bash
+# Coordinator
+taud --port 8400
+
+# Worker machines
+taud --port 8400
+
+# Register
+curl -X POST http://coordinator:8400/api/v1/workers/register \
+  -H "Authorization: Bearer $TAU_API_KEY" \
+  -d '{"worker_id":"worker-1","host":"http://w1:8400","api_key":"key","max_concurrent":4}'
+```
+
+Same interface at every scale.
+
+---
+
+## Architecture
 
 ```
-Pipeline fails at 2am
-  → Tau captures structured error trace
-  → AI agent sees failure via webhook or poll
-  → Agent calls: tau inspect pipeline --last-run
-  → Agent diagnoses: schema drift on a new column
-  → Agent writes fix, calls: tau deploy pipeline.py
-  → Next scheduled run succeeds
-  → Human sleeps through the whole thing
+┌──────────────────────────────────────────────┐
+│          AI Agent / CLI / CI/CD              │
+│                                              │
+│  tau deploy → tau run → tau inspect → heal   │
+└─────────────────────┬────────────────────────┘
+                      │ HTTP (JSON)
+┌─────────────────────▼────────────────────────┐
+│               taud (daemon)                   │
+│                                              │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
+│  │ FastAPI  │ │Scheduler │ │  Executor    │ │
+│  │ API      │ │(APSched) │ │  (pipelines) │ │
+│  └──────────┘ └──────────┘ └──────────────┘ │
+│                                              │
+│  ┌──────────────────────────────────────────┐│
+│  │     Metadata Store (SQLite / Postgres)   ││
+│  └──────────────────────────────────────────┘│
+└──────────────────────────────────────────────┘
 ```
+
+On a laptop: everything runs in one process. In production: distributed across workers. The AI doesn't know or care which — the interface is the same.
 
 ---
 
 ## Configuration
 
-Tau works with zero configuration (SQLite + localhost). For production:
+Zero configuration by default. For production:
 
 ```toml
 # tau.toml
@@ -443,36 +523,9 @@ Environment variables: `TAU_HOST`, `TAU_API_KEY`, `TAU_DATABASE_URL`, `TAU_PORT`
 
 ---
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────┐
-│         Terminal / AI Agent / CI/CD           │
-│                                              │
-│  tau deploy → tau run → tau inspect → heal   │
-└─────────────────────┬────────────────────────┘
-                      │ HTTP
-┌─────────────────────▼────────────────────────┐
-│               taud (daemon)                   │
-│                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
-│  │ FastAPI  │ │Scheduler │ │  Executor    │ │
-│  │ API      │ │(APSched) │ │  (pipelines) │ │
-│  └──────────┘ └──────────┘ └──────────────┘ │
-│                                              │
-│  ┌──────────────────────────────────────────┐│
-│  │     Metadata Store (SQLite / Postgres)   ││
-│  └──────────────────────────────────────────┘│
-└──────────────────────────────────────────────┘
-```
-
-Pipelines are the only user-authored code. Everything else is Tau infrastructure.
-
----
-
 ## Examples
 
-See the [`examples/`](examples/) directory:
+See [`examples/`](examples/):
 
 | Example | Strategy | Description |
 |---------|----------|-------------|
@@ -487,93 +540,19 @@ See the [`examples/`](examples/) directory:
 | [`view_active_users.py`](examples/view_active_users.py) | View | Reporting view |
 | [`warehouse_etl.py`](examples/warehouse_etl.py) | Multiple | Full warehouse ETL pipeline |
 | [`api_to_warehouse.py`](examples/api_to_warehouse.py) | — | REST API → PostgreSQL |
-| [`scheduled_pipeline.py`](examples/scheduled_pipeline.py) | — | Pipeline with built-in schedule |
-| [`failing_pipeline.py`](examples/failing_pipeline.py) | — | Error handling demo |
-
----
-
-## Pipeline Dependencies (DAGs)
-
-Declare dependencies between pipelines with `depends_on`. Tau resolves the graph, runs independent pipelines in parallel, and skips downstream pipelines when upstream fails.
-
-```python
-@pipeline(name="extract_orders", schedule="0 4 * * *")
-async def extract_orders(ctx): ...
-
-@pipeline(name="dim_customers", depends_on=["extract_customers"])
-async def dim_customers(ctx): ...
-
-@pipeline(name="fct_orders", depends_on=["stage_orders", "dim_customers", "dim_products"])
-async def fct_orders(ctx): ...
-```
-
-```bash
-tau dag                                    # View the DAG
-tau depends fct_orders                     # Show dependencies
-tau depends fct_orders --on stage_orders --on dim_customers  # Set via CLI
-```
-
-Execution groups (run in parallel within each group):
-```
-Group 0: [extract_orders, extract_customers, extract_products]
-Group 1: [stage_orders, dim_customers, dim_products]
-Group 2: [fct_orders]
-Group 3: [report_daily_revenue]
-```
-
----
-
-## Workers
-
-Tau runs on a single machine by default. For production, add remote workers — each one is another `taud` instance.
-
-### Single Machine (default)
-```bash
-taud                    # Starts with a local worker pool (4 concurrent)
-```
-
-### Distributed
-```bash
-# On the coordinator
-taud --port 8400
-
-# On worker machines
-taud --port 8400        # Each is a full taud instance
-
-# Register workers with the coordinator
-tau workers                               # View pool
-curl -X POST http://coordinator:8400/api/v1/workers/register \
-  -H "Authorization: Bearer $TAU_API_KEY" \
-  -d '{"worker_id":"worker-1","host":"http://w1:8400","api_key":"key","max_concurrent":4}'
-```
-
-The coordinator dispatches pipeline runs to the least-loaded worker. Remote workers use the same HTTP API the CLI uses — no special protocol.
-
----
-
-## Web Dashboard
-
-`taud` serves a web dashboard at its root URL:
-
-```bash
-taud                    # Dashboard at http://localhost:8400/
-tau dashboard           # Opens in browser
-```
-
-Shows: pipeline status, recent runs, worker pool health, scheduled jobs. Auto-refreshes every 15 seconds.
 
 ---
 
 ## Roadmap
 
 - [x] Core daemon, CLI, scheduler, executor, structured traces
-- [x] `tau create` (AI generates pipelines), `tau heal --auto` (self-healing)
+- [x] AI-powered pipeline generation and self-healing
 - [x] 9 warehouse connectors
 - [x] 8 materialization strategies with dialect-aware SQL
 - [x] Pipeline DAGs with dependency resolution and parallel execution
-- [x] Distributed workers (local + remote `taud` instances)
+- [x] Distributed workers (local + remote)
 - [x] Web dashboard
-- [ ] Tau Cloud (managed hosting, multi-tenant)
+- [ ] **Tau Cloud** — managed hosting, multi-tenant, deploy from anywhere
 
 ---
 
@@ -582,7 +561,7 @@ Shows: pipeline status, recent runs, worker pool health, scheduled jobs. Auto-re
 ```bash
 git clone https://github.com/smccaffrey/tau.git
 cd tau
-uv sync --all-extras
+uv sync --python ">=3.12" --all-extras
 uv run pytest
 ```
 

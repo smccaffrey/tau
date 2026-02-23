@@ -27,7 +27,7 @@ echo -e "${GREEN}${BOLD}     ██║   ██╔══██║██║   █
 echo -e "${GREEN}${BOLD}     ██║   ██║  ██║╚██████╔╝${NC}"
 echo -e "${GREEN}${BOLD}     ╚═╝   ╚═╝  ╚═╝ ╚═════╝${NC}"
 echo -e ""
-echo -e "  ${DIM}AI-native data pipeline orchestration${NC}"
+echo -e "  ${DIM}An embedded data orchestrator for AI systems${NC}"
 echo -e "  ${DIM}v${VERSION}${NC}"
 echo -e ""
 

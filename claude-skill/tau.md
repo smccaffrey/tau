@@ -1,16 +1,19 @@
 ---
-description: Write, deploy, and manage Tau data pipelines
+description: Write, deploy, and operate Tau data pipelines
 ---
 
-You are helping the user build data pipelines with Tau Pipelines. Tau is a daemon (`taud`) + CLI (`tau`) for AI-native pipeline orchestration. **You only write pipeline files** — everything else (scheduler, executor, API, metadata) is handled by Tau.
+Tau is an embedded data orchestrator built for AI systems. You are the operator. On a laptop, it's a lightweight daemon running in the background — your embedded data engineer. In production, it's a full platform with distributed workers. Same interface either way.
 
-## Workflow
+**You write pipeline files. You deploy them. You monitor and fix them. The CLI returns structured JSON. That's the entire surface area.**
 
-1. Write a pipeline file (Python with `@pipeline` decorator)
-2. Deploy it: `tau deploy my_pipeline.py`
-3. Run it: `tau run my_pipeline`
-4. Inspect results: `tau inspect my_pipeline --last-run`
-5. Fix failures: `tau heal my_pipeline --auto`
+## Your Workflow
+
+```bash
+tau deploy my_pipeline.py                # Deploy
+tau run my_pipeline                      # Execute
+tau inspect my_pipeline --last-run       # Read structured JSON result
+tau heal my_pipeline --auto              # Diagnose + fix failures
+```
 
 ## Pipeline Template
 
@@ -25,7 +28,7 @@ from tau import pipeline, PipelineContext
     tags=["warehouse"],         # Optional tags
 )
 async def my_pipeline(ctx: PipelineContext):
-    # Use ctx.step() for tracing
+    # Use ctx.step() for execution tracing (structured JSON output)
     async with ctx.step("extract") as step:
         data = [...]
         step.rows_out = len(data)
@@ -59,6 +62,7 @@ from tau.connectors.mysql import mysql
 from tau.connectors.http_api import http_api
 from tau.connectors.s3 import s3
 
+# Uniform interface — extract, load, execute
 async with postgres(dsn="postgresql://...") as db:
     data = await db.extract(query="SELECT * FROM users")
     await db.load(data, table="target", mode="upsert", merge_key="id")
@@ -79,20 +83,34 @@ from tau.materializations import (
 )
 ```
 
-## CLI Quick Reference
+## CLI Reference
+
+Every command returns structured JSON. Every command is one line.
 
 ```bash
 tau deploy <file> [--schedule "cron"]   # Deploy pipeline
 tau run <name>                          # Run pipeline
-tau inspect <name> --last-run           # Structured JSON result
+tau inspect <name> --last-run           # Structured JSON result (read this)
 tau list                                # List pipelines
 tau errors                              # Recent failures
 tau heal <name> [--auto]                # AI diagnosis + fix
 tau dag                                 # View dependency graph
 tau depends <name> --on dep1 --on dep2  # Set dependencies
 tau workers                             # Worker pool status
-tau create "description"                # AI generates pipeline
+tau create "description"                # Generate pipeline from intent
 tau schedule <name> "0 6 * * *"         # Set schedule
+```
+
+## Local vs Production
+
+```bash
+# Local — embedded orchestrator, zero config, SQLite
+taud                                    # Just works
+
+# Production — same commands, remote target
+export TAU_HOST=https://tau.company.com
+export TAU_API_KEY=tau_sk_prod_...
+tau deploy pipeline.py                  # Deploys to production
 ```
 
 ## Rules

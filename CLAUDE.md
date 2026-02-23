@@ -1,28 +1,25 @@
 # CLAUDE.md — Tau Pipelines
 
-## What You Need to Know
+## What This Is
 
-Tau is a data pipeline orchestration daemon. Users install it, start it (`taud`), and then **you** (the AI) write pipeline files and operate them through the `tau` CLI. That's the entire workflow.
+Tau is an embedded data orchestrator designed for you to operate. It runs as a daemon (`taud`) on the user's machine or in the cloud. You write pipeline files, deploy them through the CLI, and manage the entire lifecycle — scheduling, monitoring, error recovery — without human intervention.
 
-**You only write pipeline files.** You never modify daemon code, scheduler config, or infrastructure. Pipelines are like Airflow DAGs — the only user-authored code in the system.
+**You are the operator.** The CLI returns structured JSON. Every command is deterministic. The only code you author is pipeline files.
 
-## The Workflow
+## Your Workflow
 
 ```bash
-# 1. User installs and starts the daemon (one-time)
-pip install tau-pipelines
-taud
+# The daemon is already running (installed via `curl | bash` or `pip install tau-pipelines && taud`)
 
-# 2. You write a pipeline file
-# (this is the ONLY code you write)
-
-# 3. You deploy and operate it via CLI
-tau deploy my_pipeline.py --schedule "0 6 * * *"
-tau run my_pipeline
-tau inspect my_pipeline --last-run
-tau errors
-tau heal my_pipeline --auto
+# You write a pipeline file, then:
+tau deploy my_pipeline.py --schedule "0 6 * * *"    # Deploy it
+tau run my_pipeline                                  # Run it
+tau inspect my_pipeline --last-run                   # Read structured result
+tau errors                                           # Check for failures
+tau heal my_pipeline --auto                          # Diagnose + fix
 ```
+
+When running locally, Tau is your embedded data engineer — lightweight, zero-config, SQLite-backed. When `TAU_HOST` points to a remote instance, the same commands operate a full production platform with PostgreSQL, distributed workers, and authentication. You don't change anything.
 
 ## Writing Pipelines
 
