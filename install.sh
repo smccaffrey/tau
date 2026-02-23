@@ -73,19 +73,22 @@ fi
 # ─── Install tau-pipelines ───
 step "Installing tau-pipelines..."
 
+# Install from GitHub repo (not yet published to PyPI)
+INSTALL_SRC="tau-pipelines @ git+${REPO}.git"
+
 # Use uv tool install — creates an isolated venv with the right Python automatically
 # This handles Python version, venv creation, and PATH in one shot
-uv tool install --python ">=3.12" tau-pipelines 2>/dev/null || \
-uv tool install --python ">=3.12" tau-pipelines --force 2>/dev/null || {
+uv tool install --python ">=3.12" "$INSTALL_SRC" 2>/dev/null || \
+uv tool install --python ">=3.12" "$INSTALL_SRC" --force 2>/dev/null || {
     # Fallback: try pip in a uv-managed venv
     warn "uv tool install failed — trying pip fallback..."
     if [ -n "$PYTHON" ]; then
-        $PYTHON -m pip install --quiet --user tau-pipelines 2>/dev/null || \
-        $PYTHON -m pip install --quiet tau-pipelines
+        $PYTHON -m pip install --quiet --user "tau-pipelines @ git+${REPO}.git" 2>/dev/null || \
+        $PYTHON -m pip install --quiet "tau-pipelines @ git+${REPO}.git"
     else
-        uv pip install --python ">=3.12" --system tau-pipelines 2>/dev/null || {
+        uv pip install --python ">=3.12" --system "tau-pipelines @ git+${REPO}.git" 2>/dev/null || {
             echo -e "\n${AMBER}  ✗ Installation failed. Try manually:${NC}"
-            echo -e "  ${CYAN}uv tool install --python '>=3.12' tau-pipelines${NC}"
+            echo -e "  ${CYAN}uv tool install --python '>=3.12' 'tau-pipelines @ git+${REPO}.git'${NC}"
             exit 1
         }
     fi
