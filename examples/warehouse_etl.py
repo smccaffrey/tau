@@ -1,9 +1,15 @@
 """Full Warehouse ETL — multiple materializations in one pipeline.
 
 Demonstrates:
+- Using named connections from tau.toml
 - Composing multiple materialization strategies in a single pipeline
 - Using connectors to talk to a warehouse
 - A realistic multi-step data pipeline
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
 """
 
 from tau import pipeline, PipelineContext
@@ -23,7 +29,8 @@ from tau.materializations import (
     tags=["warehouse", "etl", "production"],
 )
 async def warehouse_etl(ctx: PipelineContext):
-    connector = ctx.connector  # Pre-configured warehouse connector
+    # Get the warehouse connection from tau.toml
+    connector = await ctx.connection("warehouse")
 
     # Step 1: Refresh dimension table (full rebuild, small table)
     async with ctx.step("dim_products") as step:

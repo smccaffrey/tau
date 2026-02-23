@@ -12,6 +12,8 @@ from typing import Any
 
 from tau.pipeline.context import PipelineContext
 from tau.models.run import RunStatus
+from tau.connections.registry import ConnectionRegistry
+from tau.core.config import get_settings
 
 
 class ExecutionResult:
@@ -40,11 +42,16 @@ async def execute_pipeline(
     result.started_at = datetime.now(tz=timezone.utc)
     result.status = RunStatus.RUNNING.value
 
+    # Create connection registry from settings
+    settings = get_settings()
+    connection_registry = ConnectionRegistry(settings.connections)
+
     ctx = PipelineContext(
         pipeline_name=pipeline_name,
         run_id=run_id,
         params=params,
         last_successful_run=last_successful_run,
+        connection_registry=connection_registry,
     )
 
     try:
@@ -88,6 +95,9 @@ async def execute_pipeline(
         ctx.log(f"FAILED: {type(e).__name__}: {str(e)}")
 
     finally:
+        # Clean up connections
+        await ctx.cleanup_connections()
+
         result.finished_at = datetime.now(tz=timezone.utc)
         if result.started_at:
             result.duration_ms = int(

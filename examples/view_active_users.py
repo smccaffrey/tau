@@ -1,8 +1,14 @@
 """View — create or replace a SQL view (zero storage).
 
 Demonstrates:
+- Using named connections from tau.toml
 - View materialization (no table, just a query alias)
 - Useful for reporting layers, semantic models
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
 """
 
 from tau import pipeline, PipelineContext
@@ -16,6 +22,9 @@ from tau.materializations import MaterializationConfig, MaterializationType
     tags=["warehouse", "view", "reporting"],
 )
 async def view_active_users(ctx: PipelineContext):
+    # Get warehouse connection from registry
+    warehouse = await ctx.connection("warehouse")
+
     config = MaterializationConfig(
         target_table="reporting.v_active_users",
         source_query="""
@@ -36,6 +45,6 @@ async def view_active_users(ctx: PipelineContext):
         strategy=MaterializationType.VIEW,
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="postgres")
+    result = await ctx.materialize(config, connector=warehouse, dialect="postgres")
     ctx.log(f"View {config.target_table} refreshed")
     return result

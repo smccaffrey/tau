@@ -1,10 +1,17 @@
 """Partitioned Events — partition-aware incremental with auto-expiry.
 
 Demonstrates:
+- Using named connections from tau.toml
 - Partitioned materialization by date
 - BigQuery-native PARTITION BY + CLUSTER BY
 - Automatic partition expiration (90 days)
 - Incremental loading into partitioned table
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "bigquery"
+project = "${BIGQUERY_PROJECT}"
+credentials_path = "${GOOGLE_APPLICATION_CREDENTIALS}"
 """
 
 from tau import pipeline, PipelineContext
@@ -18,6 +25,9 @@ from tau.materializations import PartitionedConfig
     tags=["warehouse", "partitioned", "events"],
 )
 async def partitioned_events(ctx: PipelineContext):
+    # Get warehouse connection from registry
+    warehouse = await ctx.connection("warehouse")
+
     config = PartitionedConfig(
         target_table="analytics.events",
         source_query="""
@@ -39,6 +49,6 @@ async def partitioned_events(ctx: PipelineContext):
         partition_expiration_days=90,  # Auto-delete partitions older than 90 days
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="bigquery")
+    result = await ctx.materialize(config, connector=warehouse, dialect="bigquery")
     ctx.log(f"Events partitioned: {result['rows']} total rows")
     return result

@@ -1,10 +1,16 @@
 """SCD Type 2 Customers — track full history of customer changes.
 
 Demonstrates:
+- Using named connections from tau.toml
 - SCD Type 2 materialization (slowly changing dimension)
 - valid_from/valid_to/is_current for time-travel queries
 - Row hash for change detection
 - Hard delete invalidation
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
 """
 
 from tau import pipeline, PipelineContext
@@ -18,6 +24,9 @@ from tau.materializations import SCDType2Config
     tags=["warehouse", "scd2", "dimension"],
 )
 async def scd2_customers(ctx: PipelineContext):
+    # Get warehouse connection from registry
+    warehouse = await ctx.connection("warehouse")
+
     config = SCDType2Config(
         target_table="analytics.dim_customers",
         source_query="""
@@ -40,7 +49,7 @@ async def scd2_customers(ctx: PipelineContext):
         invalidate_hard_deletes=True,  # Close records that disappear from source
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="postgres")
+    result = await ctx.materialize(config, connector=warehouse, dialect="postgres")
     ctx.log(f"SCD2 customers: {result['rows']} total rows")
     return result
 

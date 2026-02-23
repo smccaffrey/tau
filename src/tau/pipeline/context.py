@@ -3,7 +3,11 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tau.connectors.base import Connector
+    from tau.connections.registry import ConnectionRegistry
 
 
 @dataclass
@@ -28,6 +32,7 @@ class PipelineContext:
         run_id: str,
         params: dict | None = None,
         last_successful_run: datetime | None = None,
+        connection_registry: "ConnectionRegistry | None" = None,
     ):
         self.pipeline_name = pipeline_name
         self.run_id = run_id
@@ -37,6 +42,8 @@ class PipelineContext:
         self._steps: list[StepTrace] = []
         self._current_step: StepTrace | None = None
         self._result: dict = {}
+        self._connection_registry = connection_registry
+        self._active_connections: Dict[str, "Connector"] = {}
 
     def log(self, message: str) -> None:
         """Log a message (captured in execution trace)."""
@@ -87,6 +94,58 @@ class PipelineContext:
         """Get a secret by name. Stub for Phase 1."""
         import os
         return os.environ.get(name, "")
+
+    async def connection(self, name: str) -> "Connector":
+        """Get a named connection from the registry.
+
+        Connections are cached per pipeline run and automatically
+        connected on first use. They'll be disconnected when the
+        pipeline context is cleaned up.
+
+        Args:
+            name: Connection name from tau.toml
+
+        Returns:
+            Connected connector instance
+
+        Raises:
+            ValueError: If no connection registry available
+            KeyError: If connection name not found
+        """
+        if self._connection_registry is None:
+            raise ValueError(
+                "No connection registry available. "
+                "Make sure connections are configured in tau.toml"
+            )
+
+        # Return cached connection if already active
+        if name in self._active_connections:
+            return self._active_connections[name]
+
+        # Get connector from registry and connect it
+        connector = self._connection_registry.get_connection(name)
+        await connector.connect()
+
+        # Cache the active connection
+        self._active_connections[name] = connector
+        self.log(f"Connected to '{name}' ({type(connector).__name__})")
+
+        return connector
+
+    async def cleanup_connections(self) -> None:
+        """Disconnect all active connections.
+
+        This should be called at the end of pipeline execution
+        to clean up resources.
+        """
+        for name, connector in self._active_connections.items():
+            try:
+                await connector.disconnect()
+                self.log(f"Disconnected from '{name}'")
+            except Exception as e:
+                self.log(f"Error disconnecting from '{name}': {e}")
+
+        self._active_connections.clear()
 
     def get_logs(self) -> str:
         return "\n".join(self._logs)

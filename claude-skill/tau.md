@@ -51,16 +51,35 @@ async def my_pipeline(ctx: PipelineContext):
 
 ## Connectors
 
+**Preferred: Named Connections**
+Configure in `tau.toml` and access via `ctx.connection()`:
+
+```toml
+# tau.toml
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
+
+[connections.api]
+type = "http_api"
+base_url = "https://api.example.com"
+headers = { "Authorization" = "Bearer ${API_KEY}" }
+```
+
 ```python
-from tau.connectors.postgres import postgres
-from tau.connectors.bigquery import bigquery
-from tau.connectors.snowflake import snowflake
-from tau.connectors.motherduck import motherduck, duckdb_local
-from tau.connectors.redshift import redshift
-from tau.connectors.clickhouse import clickhouse
-from tau.connectors.mysql import mysql
-from tau.connectors.http_api import http_api
-from tau.connectors.s3 import s3
+@pipeline(name="sync")
+async def sync(ctx: PipelineContext):
+    api = await ctx.connection("api")
+    warehouse = await ctx.connection("warehouse")
+
+    data = await api.extract(endpoint="/users")
+    await warehouse.load(data, table="raw.users", mode="upsert", merge_key="id")
+```
+
+**Alternative: Inline Connectors**
+
+```python
+from tau.connectors import postgres, bigquery, snowflake, motherduck, duckdb_local, redshift, clickhouse, mysql, http_api, s3
 
 # Uniform interface — extract, load, execute
 async with postgres(dsn="postgresql://...") as db:
@@ -94,6 +113,8 @@ tau inspect <name> --last-run           # Structured JSON result (read this)
 tau list                                # List pipelines
 tau errors                              # Recent failures
 tau heal <name> [--auto]                # AI diagnosis + fix
+tau connections                         # List configured connections
+tau connections --test <name>           # Test connection
 tau dag                                 # View dependency graph
 tau depends <name> --on dep1 --on dep2  # Set dependencies
 tau workers                             # Worker pool status

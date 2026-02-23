@@ -1,9 +1,15 @@
 """Snapshot Balances — point-in-time snapshots with retention.
 
 Demonstrates:
+- Using named connections from tau.toml
 - Snapshot materialization (full copy each run)
 - Snapshot ID and timestamp columns
 - Retention pruning (keep last 30 snapshots)
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
 """
 
 from tau import pipeline, PipelineContext
@@ -17,6 +23,9 @@ from tau.materializations import SnapshotConfig
     tags=["warehouse", "snapshot", "finance"],
 )
 async def snapshot_balances(ctx: PipelineContext):
+    # Get warehouse connection from registry
+    warehouse = await ctx.connection("warehouse")
+
     config = SnapshotConfig(
         target_table="analytics.balance_snapshots",
         source_query="""
@@ -34,6 +43,6 @@ async def snapshot_balances(ctx: PipelineContext):
         retain_snapshots=30,  # Keep last 30 daily snapshots
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="postgres")
+    result = await ctx.materialize(config, connector=warehouse, dialect="postgres")
     ctx.log(f"Snapshot taken: {result.get('snapshot_id')}, {result['rows']} total rows")
     return result

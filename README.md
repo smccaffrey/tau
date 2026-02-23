@@ -328,7 +328,54 @@ config = MaterializationConfig(
 
 ## Connectors
 
-Connect to any data source or warehouse. Uniform interface across all connectors:
+Connect to any data source or warehouse. Two approaches: named connections from `tau.toml` (recommended) or inline connectors.
+
+### Named Connections (Recommended)
+
+Configure connections in `tau.toml` and access them via `ctx.connection()`:
+
+```toml
+# tau.toml
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
+
+[connections.api]
+type = "http_api"
+base_url = "https://api.example.com"
+headers = { "Authorization" = "Bearer ${API_KEY}" }
+```
+
+```python
+@pipeline(name="api_sync")
+async def api_sync(ctx: PipelineContext):
+    api = await ctx.connection("api")
+    warehouse = await ctx.connection("warehouse")
+
+    data = await api.extract(endpoint="/users")
+    await warehouse.load(data, table="raw.users", mode="upsert", merge_key="user_id")
+```
+
+### Inline Connectors
+
+Traditional approach — import and configure connectors directly in pipeline code:
+
+```python
+from tau.connectors import postgres, http_api
+
+@pipeline(name="inline_sync")
+async def inline_sync(ctx: PipelineContext):
+    api = http_api(base_url="https://api.example.com")
+    warehouse = postgres(dsn=ctx.secret("WAREHOUSE_DSN"))
+
+    async with api, warehouse:
+        data = await api.extract(endpoint="/users")
+        await warehouse.load(data, table="raw.users", mode="upsert", merge_key="user_id")
+```
+
+### Uniform Interface
+
+All connectors support the same methods:
 
 ```python
 async with connector:
@@ -352,10 +399,25 @@ async with connector:
 
 ### Example: API → Warehouse
 
+Using named connections from `tau.toml`:
+
 ```python
 from tau import pipeline, PipelineContext
-from tau.connectors.http_api import http_api
-from tau.connectors.postgres import postgres
+
+@pipeline(name="api_to_warehouse")
+async def api_to_warehouse(ctx: PipelineContext):
+    source = await ctx.connection("api")
+    target = await ctx.connection("warehouse")
+
+    users = await source.extract(endpoint="/v1/users")
+    await target.load(users, table="raw.users", mode="upsert", merge_key="user_id")
+```
+
+Or with inline connectors:
+
+```python
+from tau import pipeline, PipelineContext
+from tau.connectors import http_api, postgres
 
 @pipeline(name="api_to_warehouse")
 async def api_to_warehouse(ctx: PipelineContext):
@@ -403,6 +465,10 @@ tau heal <name> [--auto]
 tau dag
 tau depends <name>
 tau depends <name> --on dep1 --on dep2
+
+# Connections
+tau connections
+tau connections --test <name>
 
 # Workers
 tau workers
@@ -517,6 +583,21 @@ api_key = "tau_sk_..."
 [scheduler]
 timezone = "UTC"
 max_concurrent = 10
+
+# Named connections
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
+
+[connections.api]
+type = "http_api"
+base_url = "https://api.example.com"
+headers = { "Authorization" = "Bearer ${API_KEY}" }
+
+[connections.lake]
+type = "bigquery"
+project = "${BIGQUERY_PROJECT}"
+credentials_path = "${GOOGLE_APPLICATION_CREDENTIALS}"
 ```
 
 Environment variables: `TAU_HOST`, `TAU_API_KEY`, `TAU_DATABASE_URL`, `TAU_PORT`.

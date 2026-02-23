@@ -1,13 +1,18 @@
 """Incremental Orders — merge new/changed orders into a target table.
 
 Demonstrates:
+- Inline connector (alternative to connection registry)
 - Incremental materialization with MERGE strategy
 - Unique key matching for upserts
 - Incremental column for filtering new rows
+
+This example shows the traditional inline approach - you can also use
+named connections from tau.toml with ctx.connection("name").
 """
 
 from tau import pipeline, PipelineContext
 from tau.materializations import IncrementalConfig
+from tau.connectors import postgres
 
 
 @pipeline(
@@ -17,6 +22,9 @@ from tau.materializations import IncrementalConfig
     tags=["warehouse", "incremental"],
 )
 async def incremental_orders(ctx: PipelineContext):
+    # Traditional inline connector approach (still supported)
+    warehouse = postgres(dsn=ctx.secret("WAREHOUSE_DSN"))
+
     config = IncrementalConfig(
         target_table="analytics.orders",
         source_query="""
@@ -37,6 +45,7 @@ async def incremental_orders(ctx: PipelineContext):
         incremental_strategy="merge",  # merge | delete+insert | insert_overwrite
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="postgres")
-    ctx.log(f"Merged {result['rows']} orders (first_run={result.get('first_run', False)})")
-    return result
+    async with warehouse:
+        result = await ctx.materialize(config, connector=warehouse, dialect="postgres")
+        ctx.log(f"Merged {result['rows']} orders (first_run={result.get('first_run', False)})")
+        return result

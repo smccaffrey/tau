@@ -1,8 +1,14 @@
 """Full Refresh Products — drop and recreate the products table every run.
 
 Demonstrates:
+- Using named connections from tau.toml
 - Full refresh materialization (simplest strategy)
 - Pre/post hooks for indexes and maintenance
+
+Configure in tau.toml:
+[connections.warehouse]
+type = "postgres"
+dsn = "${WAREHOUSE_DSN}"
 """
 
 from tau import pipeline, PipelineContext
@@ -16,6 +22,9 @@ from tau.materializations import FullRefreshConfig
     tags=["warehouse", "full-refresh", "dimension"],
 )
 async def full_refresh_products(ctx: PipelineContext):
+    # Get warehouse connection from registry
+    warehouse = await ctx.connection("warehouse")
+
     config = FullRefreshConfig(
         target_table="analytics.dim_products",
         source_query="""
@@ -36,6 +45,6 @@ async def full_refresh_products(ctx: PipelineContext):
         post_hook="CREATE INDEX idx_dim_products_sku ON analytics.dim_products(sku)",
     )
 
-    result = await ctx.materialize(config, connector=ctx.connector, dialect="postgres")
+    result = await ctx.materialize(config, connector=warehouse, dialect="postgres")
     ctx.log(f"Refreshed dim_products: {result['rows']} rows")
     return result

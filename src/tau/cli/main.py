@@ -448,6 +448,47 @@ def depends(
     console.print(f"[green]✓[/green] {name} depends on: {', '.join(on)}")
 
 
+# ─── Connection Commands ───
+
+@app.command()
+def connections(
+    test: Optional[str] = typer.Option(None, "--test", help="Test a specific connection"),
+):
+    """List configured connections or test a specific connection."""
+    if test:
+        # Test specific connection
+        result = _api("POST", f"/connections/{test}/test")
+        status = "✓" if result.get("success") else "✗"
+        color = "green" if result.get("success") else "red"
+        message = result.get("message", "")
+        console.print(f"[{color}]{status}[/{color}] {test} — {message}")
+        return
+
+    # List all connections
+    result = _api("GET", "/connections")
+    connections_list = result.get("connections", {})
+
+    if not connections_list:
+        console.print("[dim]No connections configured[/dim]")
+        console.print("Configure connections in tau.toml:")
+        console.print()
+        console.print("[dim]  [connections.warehouse][/dim]")
+        console.print("[dim]  type = \"postgres\"[/dim]")
+        console.print("[dim]  dsn = \"postgresql://user:pass@localhost/db\"[/dim]")
+        return
+
+    table = Table(title="Configured Connections")
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Type", style="yellow")
+
+    for name, conn_type in connections_list.items():
+        table.add_row(name, conn_type)
+
+    console.print(table)
+    console.print(f"\n  {len(connections_list)} connections configured")
+    console.print("  Use [bold]tau connections --test <name>[/bold] to test connectivity")
+
+
 # ─── Worker Commands ───
 
 @app.command()
