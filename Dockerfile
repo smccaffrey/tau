@@ -1,7 +1,7 @@
 # Tau daemon image.
 #   docker build -t tau-pipelines .
 #   docker run -p 8400:8400 -e TAU_API_KEY=change-me tau-pipelines
-FROM python:3.12-slim AS base
+FROM python:3.15-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
