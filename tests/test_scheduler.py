@@ -4,7 +4,6 @@ import pytest
 from tau.daemon.scheduler import (
     get_scheduler, start_scheduler, stop_scheduler,
     add_cron_job, add_interval_job, remove_job, list_jobs,
-    _scheduler,
 )
 import tau.daemon.scheduler as sched_module
 

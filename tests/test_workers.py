@@ -2,13 +2,10 @@
 
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime
 
 from tau.workers.local import LocalWorker
 from tau.workers.remote import RemoteWorker
 from tau.workers.pool import WorkerPool
-from tau.daemon.executor import ExecutionResult
 
 
 # ─── Local Worker ───
@@ -52,8 +49,6 @@ async def fail(ctx: PipelineContext):
     @pytest.mark.asyncio
     async def test_concurrency(self):
         w = LocalWorker(max_concurrent=2)
-        max_concurrent = 0
-        current = 0
 
         code = '''
 from tau import pipeline, PipelineContext
@@ -136,7 +131,7 @@ class TestWorkerPool:
 
     def test_add_local(self):
         pool = WorkerPool()
-        w = pool.add_local(worker_id="l0", max_concurrent=4)
+        pool.add_local(worker_id="l0", max_concurrent=4)
         assert len(pool._local_workers) == 1
         assert pool.total_capacity == 4
 
@@ -179,8 +174,8 @@ async def test(ctx: PipelineContext):
     @pytest.mark.asyncio
     async def test_dispatch_prefers_local(self):
         pool = WorkerPool()
-        local = pool.add_local("l0", max_concurrent=2)
-        remote = pool.add_remote("r0", "http://w1:8400", "key", max_concurrent=4)
+        pool.add_local("l0", max_concurrent=2)
+        pool.add_remote("r0", "http://w1:8400", "key", max_concurrent=4)
 
         # _select_worker should prefer local
         selected = pool._select_worker(prefer_local=True)

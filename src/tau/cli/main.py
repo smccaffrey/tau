@@ -1,7 +1,6 @@
 """Tau CLI — talks to the daemon over HTTP."""
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -102,7 +101,7 @@ def run(
 ):
     """Trigger a pipeline run."""
     parsed_params = json.loads(params) if params else None
-    result = _api("POST", f"/pipelines/{name}/run", params={"params": params} if params else None)
+    result = _api("POST", f"/pipelines/{name}/run", json=parsed_params)
 
     status = result["status"]
     color = "green" if status == "success" else "red" if status == "failed" else "yellow"
@@ -166,7 +165,7 @@ def code(name: str = typer.Argument(..., help="Pipeline name")):
 @app.command()
 def undeploy(name: str = typer.Argument(..., help="Pipeline name to remove")):
     """Remove a pipeline from the daemon."""
-    result = _api("DELETE", f"/pipelines/{name}")
+    _api("DELETE", f"/pipelines/{name}")
     console.print(f"[green]✓[/green] Removed pipeline: [bold]{name}[/bold]")
 
 
@@ -252,7 +251,7 @@ def schedule(
     if every:
         params["interval_seconds"] = every
 
-    result = _api("POST", f"/pipelines/{name}/schedule", params=params)
+    _api("POST", f"/pipelines/{name}/schedule", params=params)
     console.print(f"[green]✓[/green] Schedule updated for [bold]{name}[/bold]")
     if cron:
         console.print(f"  Cron: {cron}")
@@ -377,7 +376,7 @@ def heal(
             console.print(Syntax(diagnosis["fixed_code"], "python", theme="monokai"))
 
             if auto:
-                result = _api("POST", "/pipelines", json={
+                _api("POST", "/pipelines", json={
                     "name": name,
                     "code": diagnosis["fixed_code"],
                 })

@@ -6,11 +6,11 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from tau.pipeline.decorators import PipelineMetadata, clear_registry, get_registry
+from tau.pipeline.decorators import clear_registry, get_registry
 
 
-def load_pipeline_from_file(file_path: str | Path) -> list[PipelineMetadata]:
-    """Load a Python file and return all @pipeline-decorated functions found."""
+def load_pipeline_from_file(file_path: str | Path) -> list[dict]:
+    """Load a Python file and return the metadata of every @pipeline function in it."""
     file_path = Path(file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"Pipeline file not found: {file_path}")
@@ -40,9 +40,9 @@ def extract_pipeline_metadata(file_path: str | Path) -> list[dict]:
     metas = load_pipeline_from_file(file_path)
     return [
         {
-            "name": m.name,
-            "description": m.description,
-            "tags": m.tags,
+            "name": m["name"],
+            "description": m["description"],
+            "tags": m["tags"],
         }
         for m in metas
     ]

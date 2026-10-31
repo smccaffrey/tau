@@ -7,7 +7,7 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tau.core.database import init_engine, create_tables, async_session_factory, engine, Base
+from tau.core.database import init_engine, create_tables, async_session_factory, Base
 from tau.daemon.main import create_app
 
 

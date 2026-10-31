@@ -1,6 +1,6 @@
 """API key authentication."""
 
-from fastapi import Depends, HTTPException, Security
+from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from tau.core.config import get_settings
 

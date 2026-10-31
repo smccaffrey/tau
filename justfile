@@ -128,7 +128,7 @@ bump version:
         *) echo "Usage: just bump [patch|minor|major]"; exit 1 ;;
     esac
     new="$major.$minor.$patch"
-    sed -i '' "s/__version__ = \".*\"/__version__ = \"$new\"/" src/tau/__init__.py
+    perl -pi -e "s/__version__ = \".*\"/__version__ = \"$new\"/" src/tau/__init__.py
     echo "Bumped: $current → $new"
 
 # ─── Docker ───

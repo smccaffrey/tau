@@ -3,7 +3,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tau.connectors.base import Connector

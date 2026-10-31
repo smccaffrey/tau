@@ -1,6 +1,6 @@
 """Pipeline run repository."""
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tau.models.run import PipelineRun
 

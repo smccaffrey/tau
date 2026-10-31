@@ -33,9 +33,18 @@ async def lifespan(app: FastAPI):
     set_pool(pool)
     logger.info(f"Worker pool initialized (local, max_concurrent={settings.max_concurrent})")
 
-    # Start scheduler
+    # Start scheduler, then bring back schedules and auto-deploy pipeline files
     start_scheduler()
     logger.info("Scheduler started")
+
+    from tau.daemon.bootstrap import autodeploy, restore_schedules
+
+    restored = await restore_schedules()
+    if restored:
+        logger.info(f"Restored {restored} pipeline schedule(s)")
+    if settings.autodeploy_dir:
+        deployed = await autodeploy(settings.autodeploy_dir)
+        logger.info(f"Auto-deployed {len(deployed)} pipeline(s) from {settings.autodeploy_dir}: {', '.join(deployed)}")
 
     yield
 
@@ -93,6 +102,13 @@ def main():
             port = int(args[i + 1])
         if arg == "--host" and i + 1 < len(args):
             host = args[i + 1]
+
+    if settings.api_key == "tau_dev_key" and host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            "Tau is listening on %s with the default API key. Anyone who can reach this port can "
+            "run code on this machine. Set TAU_API_KEY to a long random value.",
+            host,
+        )
 
     logger.info(f"Starting Tau daemon v{__version__} on {host}:{port}")
     logger.info(f"Dashboard: http://{host}:{port}/")

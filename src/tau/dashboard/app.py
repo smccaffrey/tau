@@ -1,7 +1,7 @@
 """Dashboard — single-page web UI served by the daemon."""
 
 from __future__ import annotations
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["dashboard"])

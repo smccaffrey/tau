@@ -47,7 +47,6 @@ class MySQLConnector(Connector):
         if not self._conn or not data:
             return 0
 
-        import aiomysql
         async with self._conn.cursor() as cursor:
             if mode == "replace":
                 await cursor.execute(f"TRUNCATE TABLE {table}")

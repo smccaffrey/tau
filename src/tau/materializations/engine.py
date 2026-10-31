@@ -1,9 +1,7 @@
 """Materialization engine — generates and executes SQL for each strategy."""
 
 from __future__ import annotations
-from datetime import datetime, timezone
 from typing import Any, Protocol
-import hashlib
 import uuid
 
 from tau.materializations.strategies import (
@@ -234,7 +232,7 @@ class MaterializationEngine:
         if not exists:
             # Create initial table with SCD2 columns
             tracked = config.tracked_columns
-            hash_expr = self._build_hash_expression(tracked) if tracked else f"'initial'"
+            hash_expr = self._build_hash_expression(tracked) if tracked else "'initial'"
 
             await self.executor.execute(f"""
                 CREATE TABLE {table} AS
@@ -251,7 +249,7 @@ class MaterializationEngine:
 
         # Stage incoming data
         tracked = config.tracked_columns
-        hash_expr = self._build_hash_expression(tracked) if tracked else f"'hash'"
+        hash_expr = self._build_hash_expression(tracked) if tracked else "'hash'"
 
         staging = f"__staging_scd2_{table.replace('.', '_')}"
         await self.executor.execute(f"""

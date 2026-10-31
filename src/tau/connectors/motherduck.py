@@ -41,7 +41,6 @@ class MotherDuckConnector(Connector):
         if not self._conn or not data:
             return 0
 
-        import duckdb
         # DuckDB can load directly from Python dicts via DataFrame
         if mode == "replace":
             self._conn.execute(f"DROP TABLE IF EXISTS {table}")

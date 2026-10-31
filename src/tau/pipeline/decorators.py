@@ -1,7 +1,7 @@
 """Pipeline decorator — marks a function as a Tau pipeline."""
 
 from __future__ import annotations
-from typing import Callable, Any
+from typing import Callable
 import functools
 
 # Global registry of decorated pipelines
@@ -61,3 +61,7 @@ def _parse_timeout(timeout: str) -> int:
 
 def get_registry() -> dict[str, dict]:
     return _pipeline_registry
+
+
+def clear_registry() -> None:
+    _pipeline_registry.clear()

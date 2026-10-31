@@ -20,9 +20,10 @@ else:
 class TauSettings(BaseSettings):
     """Daemon settings."""
 
-    # Server
-    host: str = "0.0.0.0"
-    port: int = 8400
+    # Server. Binds to loopback by default; pass --host 0.0.0.0 (or TAU_BIND_HOST) to expose it.
+    # (TAU_HOST is the *client's* daemon URL, so the bind address uses its own variable.)
+    host: str = Field(default="127.0.0.1", alias="TAU_BIND_HOST")
+    port: int = Field(default=8400, alias="TAU_PORT")
     workers: int = 4
     log_level: str = "info"
 
@@ -42,6 +43,8 @@ class TauSettings(BaseSettings):
 
     # Storage
     pipelines_dir: str = Field(default="./pipelines", alias="TAU_PIPELINES_DIR")
+    # Deploy every *.py pipeline in this folder at startup (create or update).
+    autodeploy_dir: str | None = Field(default=None, alias="TAU_AUTODEPLOY_DIR")
     artifacts_dir: str = Field(default="./artifacts", alias="TAU_ARTIFACTS_DIR")
 
     # Connections (loaded from tau.toml [connections] section)
@@ -107,12 +110,30 @@ def _load_toml_config() -> Dict[str, Any]:
     return config
 
 
+# tau.toml [section] key -> (settings field name or alias, environment variable that overrides it)
+_TOML_KEYS = {
+    ("daemon", "host"): ("TAU_BIND_HOST", "TAU_BIND_HOST"),
+    ("daemon", "port"): ("TAU_PORT", "TAU_PORT"),
+    ("daemon", "workers"): ("workers", "TAU_WORKERS"),
+    ("daemon", "log_level"): ("log_level", "TAU_LOG_LEVEL"),
+    ("database", "url"): ("TAU_DATABASE_URL", "TAU_DATABASE_URL"),
+    ("auth", "api_key"): ("TAU_API_KEY", "TAU_API_KEY"),
+    ("scheduler", "timezone"): ("timezone", "TAU_TIMEZONE"),
+    ("scheduler", "max_concurrent"): ("max_concurrent", "TAU_MAX_CONCURRENT"),
+}
+
+
 def get_settings() -> TauSettings:
-    # Load from tau.toml files
+    """Build settings with precedence: environment variables > tau.toml > defaults."""
     toml_config = _load_toml_config()
 
-    # Create settings with connections from toml
-    settings = TauSettings()
+    overrides: Dict[str, Any] = {}
+    for (section, key), (field, env_var) in _TOML_KEYS.items():
+        value = toml_config.get(section, {}).get(key)
+        if value is not None and env_var not in os.environ:
+            overrides[field] = value
+
+    settings = TauSettings(**overrides)
     if "connections" in toml_config:
         settings.connections = toml_config["connections"]
 

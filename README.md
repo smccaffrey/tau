@@ -64,6 +64,19 @@ curl -fsSL https://raw.githubusercontent.com/smccaffrey/tau/main/install.sh | ba
 
 Installs Tau via `uv`, generates an API key, starts the daemon, and sets up Claude Code integration. Ready in 30 seconds.
 
+### Docker
+
+```bash
+docker build -t tau https://github.com/smccaffrey/tau.git#main
+docker run -d -p 127.0.0.1:8400:8400 -v tau-data:/data \
+  -e TAU_API_KEY=$(openssl rand -hex 16) \
+  -v $PWD/pipelines:/pipelines -e TAU_AUTODEPLOY_DIR=/pipelines tau
+```
+
+State lives in `/data`. Pipelines in the mounted folder are deployed on start.
+Tau is also the orchestration layer of [Synapse](https://github.com/smccaffrey/synapse),
+whose `docker compose up` runs it next to the rest of the data platform.
+
 ### Manual install
 
 ```bash
@@ -600,7 +613,19 @@ project = "${BIGQUERY_PROJECT}"
 credentials_path = "${GOOGLE_APPLICATION_CREDENTIALS}"
 ```
 
-Environment variables: `TAU_HOST`, `TAU_API_KEY`, `TAU_DATABASE_URL`, `TAU_PORT`.
+Environment variables override `tau.toml`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TAU_API_KEY` | `tau_dev_key` | API key the daemon requires and the CLI sends. **Change it** before exposing the daemon. |
+| `TAU_BIND_HOST` | `127.0.0.1` | Address `taud` listens on. Use `0.0.0.0` in containers. |
+| `TAU_PORT` | `8400` | Port `taud` listens on |
+| `TAU_DATABASE_URL` | `sqlite+aiosqlite:///tau.db` | Metadata database (SQLite or PostgreSQL) |
+| `TAU_HOME` | `~/.tau` | Where the global `tau.toml` is read from |
+| `TAU_AUTODEPLOY_DIR` | unset | Deploy every `*.py` pipeline in this folder on startup (files starting with `_` are skipped) |
+| `TAU_HOST` | `http://localhost:8400` | *CLI only:* which daemon to talk to |
+
+Deployed schedules are restored automatically when the daemon restarts.
 
 ---
 
@@ -644,10 +669,13 @@ git clone https://github.com/smccaffrey/tau.git
 cd tau
 uv sync --python ">=3.12" --all-extras
 uv run pytest
+uv run ruff check src tests
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)

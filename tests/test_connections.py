@@ -338,4 +338,4 @@ class TestPipelineContextConnections:
 
 
 # We need to make asyncio available for the tests that use it directly
-import asyncio
+import asyncio  # noqa: E402

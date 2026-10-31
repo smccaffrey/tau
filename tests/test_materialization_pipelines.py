@@ -11,7 +11,7 @@ Tests cover:
 """
 
 import pytest
-from tau import pipeline, PipelineContext
+from tau import PipelineContext
 from tau.materializations import (
     MaterializationType,
     MaterializationConfig,
@@ -173,7 +173,7 @@ class TestFullRefreshPipeline:
         executor.set_query_result("SELECT 1 AS", [{"id": 99}])
 
         engine = MaterializationEngine(executor, dialect="postgres")
-        result = await engine.materialize(FullRefreshConfig(
+        await engine.materialize(FullRefreshConfig(
             target_table="t", source_query="SELECT 1 AS id",
         ))
         assert executor.query_contains("DROP TABLE")
@@ -544,7 +544,7 @@ class TestPartitionedPipeline:
         executor.set_query_result("raw.logs", [{"ts": "2026-01-01", "msg": "hi"}])
 
         engine = MaterializationEngine(executor, dialect="clickhouse")
-        result = await engine.materialize(PartitionedConfig(
+        await engine.materialize(PartitionedConfig(
             target_table="logs",
             source_query="SELECT * FROM raw.logs",
             partition_by="ts",
