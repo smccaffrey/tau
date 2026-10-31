@@ -1,8 +1,7 @@
 """Tests for PipelineContext — the runtime context passed to pipelines."""
 
 import pytest
-import pytest_asyncio
-from tau.pipeline.context import PipelineContext, StepContext
+from tau.pipeline.context import PipelineContext
 
 
 class TestPipelineContext:
@@ -127,7 +126,7 @@ class TestStepContext:
     async def test_step_failure(self):
         ctx = PipelineContext(pipeline_name="test", run_id="run-1")
         with pytest.raises(ValueError):
-            async with ctx.step("bad_step") as step:
+            async with ctx.step("bad_step"):
                 raise ValueError("oops")
 
         assert ctx._steps[0].status == "failed"

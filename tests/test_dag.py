@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from tau.dag.resolver import DAGResolver, CycleError
-from tau.dag.runner import DAGRunner, DAGRunResult
+from tau.dag.runner import DAGRunner
 
 
 # ─── Resolver Tests ───
@@ -263,7 +263,7 @@ class TestDAGRunner:
             return {"status": "success"}
 
         runner = DAGRunner(dag, run_fn=mock_run)
-        result = await runner.run_downstream("A")
+        await runner.run_downstream("A")
 
         assert "D" not in execution_log
         assert "A" in execution_log

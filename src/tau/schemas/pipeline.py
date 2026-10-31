@@ -1,7 +1,7 @@
 """Pydantic schemas for pipelines."""
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class PipelineCreate(BaseModel):

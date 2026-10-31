@@ -1,9 +1,7 @@
 """Scheduled pipeline runner — called by APScheduler."""
 
-import asyncio
 import logging
 import uuid
-from datetime import datetime
 
 from tau.core.database import async_session_factory
 from tau.repositories.pipeline_repo import PipelineRepository

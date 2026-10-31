@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import asyncio
-from functools import partial
 from tau.connectors.base import Connector
 
 

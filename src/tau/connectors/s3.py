@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import csv
 import io
-from typing import Any
 from tau.connectors.base import Connector
 
 

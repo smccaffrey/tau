@@ -1,7 +1,6 @@
 """Generic HTTP API connector."""
 
 from __future__ import annotations
-from typing import Any
 import httpx
 from tau.connectors.base import Connector
 

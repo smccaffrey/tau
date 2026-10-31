@@ -3,7 +3,6 @@
 from __future__ import annotations
 import json
 import os
-from typing import Optional
 
 import httpx
 
@@ -119,7 +118,7 @@ async def generate_pipeline(
         if code.startswith("```"):
             lines = code.split("\n")
             # Remove first and last lines (```python and ```)
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             code = "\n".join(lines)
 
         return code.strip()
@@ -195,7 +194,7 @@ Respond with ONLY a JSON object:
         # Parse JSON from response (handle markdown fences)
         if "```" in text:
             lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             text = "\n".join(lines)
 
         try:

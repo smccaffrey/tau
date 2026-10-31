@@ -8,16 +8,15 @@ from tau.core.auth import verify_api_key
 from tau.repositories.pipeline_repo import PipelineRepository
 from tau.repositories.run_repo import RunRepository
 from tau.schemas.pipeline import (
-    PipelineCreate, PipelineUpdate, PipelineResponse,
+    PipelineCreate, PipelineResponse,
     PipelineListResponse, PipelineCodeResponse,
 )
-from tau.daemon.executor import execute_pipeline, ExecutionResult
+from tau.daemon.executor import execute_pipeline
 from tau.daemon.scheduler import add_cron_job, add_interval_job, remove_job
 from tau.models.run import RunStatus
 from tau.schemas.run import RunResponse
 
 import uuid
-from datetime import datetime
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 

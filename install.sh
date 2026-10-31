@@ -136,7 +136,7 @@ if [ ! -f "$TAU_DIR/tau.toml" ]; then
 # Docs: https://github.com/smccaffrey/tau
 
 [daemon]
-host = "0.0.0.0"
+host = "127.0.0.1"  # use 0.0.0.0 to accept remote connections
 port = 8400
 
 [database]

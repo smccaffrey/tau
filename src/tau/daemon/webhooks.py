@@ -3,7 +3,6 @@
 from __future__ import annotations
 import logging
 import httpx
-from typing import Any
 
 logger = logging.getLogger("tau.webhooks")
 

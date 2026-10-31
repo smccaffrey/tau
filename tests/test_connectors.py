@@ -1,7 +1,6 @@
 """Tests for connectors."""
 
 import pytest
-from tau.connectors.base import Connector
 from tau.connectors.http_api import HttpApiConnector, http_api
 from tau.connectors.s3 import S3Connector, s3
 from tau.connectors.postgres import PostgresConnector, postgres
@@ -38,7 +37,7 @@ class TestConnectorFactories:
         assert conn.location == "EU"
 
     def test_motherduck_factory(self):
-        from tau.connectors.motherduck import motherduck, duckdb_local, MotherDuckConnector
+        from tau.connectors.motherduck import motherduck, MotherDuckConnector
         conn = motherduck(token="md_token", database="analytics")
         assert isinstance(conn, MotherDuckConnector)
         assert conn.token == "md_token"

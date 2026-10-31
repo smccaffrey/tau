@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, JSON, Integer, ForeignKey, Float
+from sqlalchemy import String, Text, DateTime, JSON, Integer, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from tau.core.database import Base
 import enum

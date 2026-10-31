@@ -21,6 +21,8 @@ tau heal my_pipeline --auto                          # Diagnose + fix
 
 When running locally, Tau is your embedded data engineer — lightweight, zero-config, SQLite-backed. When `TAU_HOST` points to a remote instance, the same commands operate a full production platform with PostgreSQL, distributed workers, and authentication. You don't change anything.
 
+If the daemon was started with `TAU_AUTODEPLOY_DIR` (as in Synapse's docker compose), every `*.py` file in that folder is deployed on startup, so you can also add a pipeline by dropping a file there and restarting the daemon.
+
 ## Writing Pipelines
 
 Every pipeline is a single Python file with a `@pipeline` decorator:
