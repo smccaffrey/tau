@@ -8,5 +8,5 @@ tau.db
 tau.toml
 .env
 artifacts/
-pipelines/
+/pipelines/
 .ruff_cache/
