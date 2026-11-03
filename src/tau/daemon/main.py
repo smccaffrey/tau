@@ -1,6 +1,10 @@
 """Tau daemon — FastAPI app with built-in scheduler, worker pool, and dashboard."""
 
+import asyncio
 import logging
+import socket
+
+import httpx
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -29,9 +33,20 @@ async def lifespan(app: FastAPI):
 
     # Init worker pool
     pool = WorkerPool()
-    pool.add_local(max_concurrent=settings.max_concurrent)
+    if settings.local_execution:
+        pool.add_local(max_concurrent=settings.max_concurrent)
+        logger.info(f"Worker pool initialized (local, max_concurrent={settings.max_concurrent})")
+    else:
+        logger.info("Worker pool initialized without a local worker (TAU_LOCAL_EXECUTION=false)")
     set_pool(pool)
-    logger.info(f"Worker pool initialized (local, max_concurrent={settings.max_concurrent})")
+
+    from tau.api.dag import load_dag
+    from tau.core import database
+
+    async with database.async_session_factory() as session:
+        edges = await load_dag(session)
+    if edges:
+        logger.info(f"Loaded {edges} pipeline dependenc{'y' if edges == 1 else 'ies'}")
 
     # Start scheduler, then bring back schedules and auto-deploy pipeline files
     start_scheduler()
@@ -46,12 +61,60 @@ async def lifespan(app: FastAPI):
         deployed = await autodeploy(settings.autodeploy_dir)
         logger.info(f"Auto-deployed {len(deployed)} pipeline(s) from {settings.autodeploy_dir}: {', '.join(deployed)}")
 
+    tasks = [asyncio.create_task(_heartbeat_loop(pool, settings.heartbeat_interval))]
+    if settings.coordinator_url:
+        tasks.append(asyncio.create_task(_register_loop(settings)))
+
     yield
 
     # Shutdown
+    for task in tasks:
+        task.cancel()
     await pool.disconnect_remotes()
     stop_scheduler()
     logger.info("Tau daemon stopped")
+
+
+async def _heartbeat_loop(pool: WorkerPool, interval: int) -> None:
+    """Health-check remote workers so offline ones come back when they recover."""
+    while True:
+        await asyncio.sleep(max(1, interval))
+        try:
+            await pool.broadcast_heartbeat()
+        except Exception as e:  # pragma: no cover - keep the loop alive
+            logger.warning(f"Worker heartbeat failed: {e}")
+
+
+async def _register_loop(settings) -> None:
+    """Worker mode: register with the coordinator now and on every heartbeat interval.
+
+    Re-registering is idempotent on the coordinator, and it re-adds this worker after a
+    coordinator restart (the coordinator keeps its worker list in memory).
+    """
+    worker_id = settings.worker_id or socket.gethostname()
+    advertise = settings.advertise_url or f"http://{socket.gethostname()}:{settings.port}"
+    payload = {
+        "worker_id": worker_id,
+        "host": advertise,
+        "api_key": settings.api_key,
+        "max_concurrent": settings.max_concurrent,
+    }
+    headers = {"Authorization": f"Bearer {settings.coordinator_api_key or settings.api_key}"}
+    url = settings.coordinator_url.rstrip("/") + "/api/v1/workers/register"
+    registered = False
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                status = resp.json().get("status")
+                if not registered or status != "registered":
+                    logger.info(f"Registered with coordinator {settings.coordinator_url} as {worker_id} ({status})")
+                registered = status == "registered"
+            except Exception as e:
+                registered = False
+                logger.warning(f"Could not register with coordinator {settings.coordinator_url}: {e}")
+            await asyncio.sleep(max(1, settings.heartbeat_interval))
 
 
 def create_app() -> FastAPI:

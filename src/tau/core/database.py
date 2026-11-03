@@ -1,5 +1,7 @@
 """Async database engine and session management."""
 
+from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -9,6 +11,17 @@ async_session_factory = None
 
 class Base(DeclarativeBase):
     pass
+
+
+def to_db_time(value):
+    """Store timestamps as naive UTC.
+
+    The columns are ``TIMESTAMP WITHOUT TIME ZONE``. SQLite accepts aware datetimes,
+    but asyncpg rejects them for these columns, which broke every run on PostgreSQL.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def init_engine(database_url: str):
@@ -26,5 +39,7 @@ async def get_session() -> AsyncSession:
 
 
 async def create_tables():
+    import tau.models.dag  # noqa: F401  (register tables that nothing else imports)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

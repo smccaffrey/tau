@@ -1,0 +1,57 @@
+# Distributed Tau: one coordinator (PostgreSQL metadata, scheduler, API) and two workers.
+#
+#   cd examples/distributed
+#   TAU_API_KEY=$(openssl rand -hex 16) docker compose up -d --build
+#   export TAU_HOST=http://localhost:8400 TAU_API_KEY=<same key>
+#   tau workers                  # coordinator + worker-1 + worker-2
+#   tau run where_am_i           # result.host shows which worker ran it
+#
+# Workers register themselves with the coordinator (TAU_COORDINATOR_URL) and re-register
+# every TAU_HEARTBEAT_INTERVAL seconds, so restarting the coordinator is safe. Scale out
+# with `docker compose up -d --scale worker=4` (each replica registers under its hostname).
+
+x-tau: &tau
+  build: ../..
+  image: tau-pipelines
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tau
+      POSTGRES_PASSWORD: tau
+      POSTGRES_DB: tau
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tau"]
+      interval: 2s
+      retries: 30
+
+  coordinator:
+    <<: *tau
+    hostname: coordinator
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      TAU_API_KEY: ${TAU_API_KEY:?set TAU_API_KEY}
+      TAU_DATABASE_URL: postgresql+asyncpg://tau:tau@db:5432/tau
+      TAU_AUTODEPLOY_DIR: /pipelines
+      # Leave all pipeline work to the workers. Set to true to let the coordinator help.
+      TAU_LOCAL_EXECUTION: "false"
+    volumes: ["./pipelines:/pipelines:ro"]
+    ports: ["127.0.0.1:8400:8400"]
+
+  worker:
+    <<: *tau
+    deploy:
+      replicas: 2
+    depends_on: [coordinator]
+    environment:
+      TAU_API_KEY: ${TAU_API_KEY:?set TAU_API_KEY}
+      TAU_COORDINATOR_URL: http://coordinator:8400
+      TAU_MAX_CONCURRENT: "4"
+      # Secrets your pipelines read with ctx.secret(...) belong on the workers.
+
+volumes:
+  pgdata:

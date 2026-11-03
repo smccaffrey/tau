@@ -104,7 +104,7 @@ from tau.materializations import (
 
 ## CLI Reference
 
-Every command returns structured JSON. Every command is one line.
+Every command is one line. Put `--json` before any command for the raw JSON response; `tau run` exits 1 on failure.
 
 ```bash
 tau deploy <file> [--schedule "cron"]   # Deploy pipeline
@@ -116,6 +116,7 @@ tau heal <name> [--auto]                # AI diagnosis + fix
 tau connections                         # List configured connections
 tau connections --test <name>           # Test connection
 tau dag                                 # View dependency graph
+tau dag --run [--from <name>]           # Run the DAG in dependency order
 tau depends <name> --on dep1 --on dep2  # Set dependencies
 tau workers                             # Worker pool status
 tau create "description"                # Generate pipeline from intent

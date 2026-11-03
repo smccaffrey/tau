@@ -5,6 +5,8 @@ from pydantic import BaseModel
 
 
 class PipelineCreate(BaseModel):
+    """Deploy request. Fields left out are read from the code's ``@pipeline(...)`` decorator."""
+
     name: str
     description: str | None = None
     code: str
@@ -13,8 +15,8 @@ class PipelineCreate(BaseModel):
     depends_on: list[str] | None = None
     schedule_cron: str | None = None
     schedule_interval: int | None = None
-    retry_count: int = 3
-    timeout_seconds: int = 1800
+    retry_count: int | None = None
+    timeout_seconds: int | None = None
 
 
 class PipelineUpdate(BaseModel):

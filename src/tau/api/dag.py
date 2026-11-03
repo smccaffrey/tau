@@ -2,18 +2,30 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tau.core.auth import verify_api_key
+from tau.core.database import get_session
 from tau.dag.resolver import DAGResolver, CycleError
+from tau.repositories.dependency_repo import DependencyRepository
 
 router = APIRouter(prefix="/dag", tags=["dag"])
 
-# In-memory DAG (rebuilt from DB on startup, modified via API)
+# In-memory DAG. Edges are stored in the pipeline_dependencies table and loaded on startup.
 _dag = DAGResolver()
 
 
 def get_dag() -> DAGResolver:
     return _dag
+
+
+async def load_dag(session: AsyncSession) -> int:
+    """Rebuild the in-memory DAG from the database. Returns the number of edges."""
+    edges = await DependencyRepository(session).list_edges()
+    _dag.nodes.clear()
+    for up, down in edges:
+        _dag.add_dependency(up, down)
+    return len(edges)
 
 
 class DependencyCreate(BaseModel):
@@ -38,44 +50,54 @@ async def get_dag_info(_: str = Depends(verify_api_key)):
 @router.post("/dependency")
 async def add_dependency(
     data: DependencyCreate,
+    session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
     """Add a single dependency edge."""
-    _dag.add_dependency(data.upstream, data.downstream)
-    cycle = _dag.detect_cycles()
-    if cycle:
-        # Roll back — remove the edge
-        _dag._nodes[data.upstream].downstream.discard(data.downstream)
-        _dag._nodes[data.downstream].upstream.discard(data.upstream)
-        raise HTTPException(400, f"Would create cycle: {' → '.join(cycle)}")
+    upstream = sorted(_dag.nodes[data.downstream].upstream) if data.downstream in _dag.nodes else []
+    try:
+        _dag.set_upstream(data.downstream, upstream + [data.upstream])
+    except CycleError as e:
+        raise HTTPException(400, f"Would create cycle: {' → '.join(e.cycle)}")
+    await DependencyRepository(session).add_edge(data.upstream, data.downstream)
     return {"status": "added", "upstream": data.upstream, "downstream": data.downstream}
 
 
 @router.post("/dependencies")
 async def set_dependencies(
     data: DependenciesSet,
+    session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Set all dependencies for a pipeline."""
-    # Clear existing upstream deps
-    if data.pipeline in _dag._nodes:
-        old_upstream = list(_dag._nodes[data.pipeline].upstream)
-        for up in old_upstream:
-            _dag._nodes[up].downstream.discard(data.pipeline)
-        _dag._nodes[data.pipeline].upstream.clear()
-
-    # Add new deps
-    _dag.add_dependencies(data.pipeline, data.depends_on)
-
-    cycle = _dag.detect_cycles()
-    if cycle:
-        raise HTTPException(400, f"Dependency cycle: {' → '.join(cycle)}")
+    """Set all dependencies for a pipeline (replaces the existing ones)."""
+    try:
+        _dag.set_upstream(data.pipeline, data.depends_on)
+    except CycleError as e:
+        raise HTTPException(400, f"Dependency cycle: {' → '.join(e.cycle)}")
+    await DependencyRepository(session).set_upstream(data.pipeline, data.depends_on)
 
     return {
         "status": "set",
         "pipeline": data.pipeline,
         "depends_on": data.depends_on,
     }
+
+
+@router.post("/run")
+async def run_dag(root: str | None = None, _: str = Depends(verify_api_key)):
+    """Run the whole DAG, or ``root`` and everything downstream of it, in dependency order.
+
+    Pipelines in the same level run in parallel; a pipeline whose upstream failed is skipped.
+    """
+    from tau.daemon.runner import run_dag as _run_dag
+
+    if root is not None and root not in _dag.nodes:
+        raise HTTPException(404, f"'{root}' is not part of the DAG")
+    try:
+        result = await _run_dag(root=root)
+    except CycleError as e:
+        raise HTTPException(400, str(e))
+    return result.to_dict()
 
 
 @router.get("/order")

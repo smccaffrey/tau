@@ -97,7 +97,7 @@ class DAGRunner:
                         r = await self.run_fn(name)
                         result.results[name] = r
                         status = r.get("status", "success")
-                        if status in ("failed", "error"):
+                        if status != "success":  # failed, timeout, error, ...
                             failed_set.add(name)
                             result.failed.append(name)
                         return r

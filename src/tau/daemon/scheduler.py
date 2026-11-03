@@ -32,6 +32,26 @@ def stop_scheduler():
         logger.info("Scheduler stopped")
 
 
+def _cron_trigger(cron_expression: str, timezone: str = "UTC") -> CronTrigger:
+    """Build a trigger from a 5-field cron expression (min hour day month dow)."""
+    parts = cron_expression.strip().split()
+    if len(parts) != 5:
+        raise ValueError(f"Invalid cron expression: {cron_expression} (need 5 fields)")
+    return CronTrigger(
+        minute=parts[0],
+        hour=parts[1],
+        day=parts[2],
+        month=parts[3],
+        day_of_week=parts[4],
+        timezone=timezone,
+    )
+
+
+def validate_cron(cron_expression: str) -> None:
+    """Raise ValueError if ``cron_expression`` is not a valid 5-field cron expression."""
+    _cron_trigger(cron_expression)
+
+
 def add_cron_job(
     job_id: str,
     func,
@@ -48,19 +68,7 @@ def add_cron_job(
     except Exception:
         pass
 
-    # Parse cron expression (5 fields: min hour day month dow)
-    parts = cron_expression.strip().split()
-    if len(parts) != 5:
-        raise ValueError(f"Invalid cron expression: {cron_expression} (need 5 fields)")
-
-    trigger = CronTrigger(
-        minute=parts[0],
-        hour=parts[1],
-        day=parts[2],
-        month=parts[3],
-        day_of_week=parts[4],
-        timezone=timezone,
-    )
+    trigger = _cron_trigger(cron_expression, timezone)
 
     scheduler.add_job(
         func,

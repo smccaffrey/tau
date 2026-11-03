@@ -11,6 +11,10 @@ from tau.daemon.executor import ExecutionResult
 logger = logging.getLogger("tau.workers.remote")
 
 
+class WorkerUnavailable(Exception):
+    """The worker could not be reached, so the run never started there."""
+
+
 class RemoteWorker:
     """Delegates pipeline execution to a remote Tau daemon.
 
@@ -77,67 +81,63 @@ class RemoteWorker:
         params: dict | None = None,
         timeout_seconds: int = 1800,
         last_successful_run: datetime | None = None,
+        retry_count: int = 0,
     ) -> ExecutionResult:
-        """Execute a pipeline on the remote worker."""
+        """Execute a pipeline on the remote worker.
+
+        The worker runs the code through its own local worker (``POST /api/v1/workers/execute``)
+        without storing the pipeline, its runs, or its schedule: the coordinator owns those.
+
+        Raises WorkerUnavailable (and marks the worker offline) when the worker cannot be
+        reached, so the pool can send the run somewhere else.
+        """
         if not self._client:
             raise RuntimeError(f"Worker {self.worker_id} not connected")
 
         self._current_load += 1
         self._status = "busy"
 
+        # Allow for every retry and its backoff before giving up on the HTTP call.
+        attempts = 1 + max(0, retry_count or 0)
+        http_timeout = timeout_seconds * attempts + 30 * attempts + 30
+
         try:
-            # First ensure the pipeline is deployed on the remote
-            deploy_resp = await self._client.post(
-                "/api/v1/pipelines",
+            resp = await self._client.post(
+                "/api/v1/workers/execute",
                 json={
-                    "name": pipeline_name,
+                    "pipeline_name": pipeline_name,
                     "code": code,
+                    "run_id": run_id,
+                    "params": params,
                     "timeout_seconds": timeout_seconds,
+                    "retry_count": retry_count,
+                    "last_successful_run": (
+                        last_successful_run.isoformat() if last_successful_run else None
+                    ),
                 },
+                timeout=httpx.Timeout(http_timeout, connect=10.0),
             )
-            deploy_resp.raise_for_status()
-
-            # Then trigger the run
-            run_resp = await self._client.post(
-                f"/api/v1/pipelines/{pipeline_name}/run",
-                json=params,
-                timeout=timeout_seconds + 10,  # Extra buffer
-            )
-            run_resp.raise_for_status()
-            data = run_resp.json()
-
-            # Map to ExecutionResult
-            result = ExecutionResult()
-            result.status = data.get("status", "unknown")
-            result.result = data.get("result")
-            result.error = data.get("error")
-            result.trace = data.get("trace")
-            result.logs = data.get("logs")
-            result.duration_ms = data.get("duration_ms")
-
-            if data.get("started_at"):
-                result.started_at = datetime.fromisoformat(data["started_at"])
-            if data.get("finished_at"):
-                result.finished_at = datetime.fromisoformat(data["finished_at"])
-
+            resp.raise_for_status()
+            result = ExecutionResult.from_dict(resp.json())
             logger.info(f"[{self.worker_id}] {pipeline_name}: {result.status}")
             return result
 
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            self._status = "offline"
+            raise WorkerUnavailable(f"Worker {self.worker_id} at {self.host} is unreachable: {e}")
         except httpx.HTTPStatusError as e:
-            result = ExecutionResult()
-            result.status = "failed"
-            result.error = f"Remote worker error: {e.response.status_code} — {e.response.text}"
-            return result
+            return ExecutionResult.failure(
+                f"Remote worker {self.worker_id} error: {e.response.status_code} — {e.response.text}"
+            )
         except Exception as e:
-            result = ExecutionResult()
-            result.status = "failed"
-            result.error = f"Remote worker unreachable: {e}"
-            return result
+            # The request may have reached the worker, so the run is not retried elsewhere.
+            return ExecutionResult.failure(
+                f"Lost contact with remote worker {self.worker_id} during the run: {type(e).__name__}: {e}"
+            )
         finally:
-            self._current_load -= 1
-            if self._current_load <= 0:
-                self._current_load = 0
-                self._status = "idle"
+            self._current_load = max(0, self._current_load - 1)
+            if self._status != "offline":
+                self._status = "idle" if self._current_load == 0 else "busy"
 
     async def heartbeat(self) -> dict:
         """Check worker health and get current status."""

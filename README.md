@@ -25,7 +25,7 @@ Every existing orchestrator — Airflow, Dagster, Prefect — was built for huma
 
 Tau is built the other way around. **The AI is the operator.**
 
-- **Every CLI command returns structured JSON** — no parsing HTML dashboards or log files
+- **Every CLI command speaks JSON** — add `--json` (or set `TAU_JSON=1`) and every command prints the raw API response; `tau run` and `tau dag --run` exit non-zero when a run fails
 - **The entire interface is text in, text out** — perfect for LLM tool use
 - **Pipelines are the only authored code** — the AI writes a Python file and deploys it. That's the whole workflow.
 - **Self-healing is native** — `tau heal --auto` gives the AI a structured error trace it can reason about and fix
@@ -49,7 +49,7 @@ Point at a remote instance. Same CLI, same pipelines, full platform — PostgreS
 export TAU_HOST=https://tau.mycompany.com
 export TAU_API_KEY=tau_sk_prod_...
 tau deploy my_etl.py          # Deploys to production
-tau run my_etl                # Runs on remote workers
+tau run my_etl                # Runs on the least-loaded worker
 ```
 
 ---
@@ -134,6 +134,11 @@ tau deploy my_pipeline.py
 tau run hello_world
 tau inspect hello_world --last-run
 ```
+
+`tau deploy` reads the `@pipeline(...)` arguments (`schedule`, `retry`, `timeout`, `tags`,
+`depends_on`, `description`) from the file; CLI flags such as `--schedule` override them.
+A failing run is retried `retry` times (default 3) with exponential backoff before it is
+marked failed; timeouts are not retried.
 
 ### 4. Schedule it
 
@@ -448,6 +453,8 @@ async def api_to_warehouse(ctx: PipelineContext):
 
 Every command returns structured JSON. Every command is one line. Designed for AI tool use.
 
+Add `--json` before the command (`tau --json runs my_etl`) to get the raw JSON response.
+
 ```bash
 # Pipeline lifecycle
 tau deploy <file> [--schedule "cron"] [--name override]
@@ -476,6 +483,7 @@ tau heal <name> [--auto]
 
 # DAG
 tau dag
+tau dag --run [--from <name>]
 tau depends <name>
 tau depends <name> --on dep1 --on dep2
 
@@ -515,7 +523,13 @@ async def fct_orders(ctx): ...
 ```bash
 tau dag                                    # View the DAG
 tau depends fct_orders                     # Show dependencies
+tau dag --run                              # Run everything in dependency order
+tau dag --run --from extract_orders        # Run one pipeline and everything downstream
 ```
+
+Dependencies are stored in the metadata database, so they survive restarts. When a
+scheduled pipeline succeeds, its downstream dependents run right after it (so usually only
+the roots need a schedule).
 
 ---
 
@@ -531,22 +545,33 @@ taud                    # Starts with local worker pool
 
 ### Production (distributed)
 
-Multiple `taud` instances, coordinated dispatch, least-loaded routing.
+One coordinator plus any number of workers, all running `taud`. The coordinator owns the
+metadata database, the scheduler, the DAG and the API; workers only execute pipeline code.
 
 ```bash
-# Coordinator
-taud --port 8400
+# Coordinator (use PostgreSQL so its state survives the machine)
+TAU_DATABASE_URL=postgresql+asyncpg://tau:tau@db/tau TAU_LOCAL_EXECUTION=false \
+  taud --host 0.0.0.0
 
-# Worker machines
-taud --port 8400
-
-# Register
-curl -X POST http://coordinator:8400/api/v1/workers/register \
-  -H "Authorization: Bearer $TAU_API_KEY" \
-  -d '{"worker_id":"worker-1","host":"http://w1:8400","api_key":"key","max_concurrent":4}'
+# Each worker registers itself with the coordinator
+TAU_COORDINATOR_URL=http://coordinator:8400 TAU_ADVERTISE_URL=http://worker-1:8400 \
+  taud --host 0.0.0.0
 ```
 
-Same interface at every scale.
+- Each run (manual, scheduled or DAG) goes to the online worker with the lowest load; ties
+  rotate. When every worker is full the run waits for a free slot.
+- If a worker cannot be reached, the run fails over to another worker and the unreachable one
+  is marked offline until a heartbeat (`TAU_HEARTBEAT_INTERVAL`, default 15s) sees it again.
+- If a worker dies *during* a run, the run is marked failed rather than re-run elsewhere,
+  because it may already have written data.
+- Workers re-register every heartbeat interval, so restarting the coordinator is safe.
+- Use the same `TAU_API_KEY` everywhere, or set `TAU_COORDINATOR_API_KEY` on workers.
+- Secrets that pipelines read with `ctx.secret()` (and `tau.toml` connections) must exist on
+  the workers, since that is where the code runs.
+
+[`examples/distributed/`](examples/distributed/) runs a coordinator, PostgreSQL and two
+workers with `docker compose`. You can also register a worker by hand with
+`POST /api/v1/workers/register`.
 
 ---
 
@@ -623,6 +648,13 @@ Environment variables override `tau.toml`:
 | `TAU_DATABASE_URL` | `sqlite+aiosqlite:///tau.db` | Metadata database (SQLite or PostgreSQL) |
 | `TAU_HOME` | `~/.tau` | Where the global `tau.toml` is read from |
 | `TAU_AUTODEPLOY_DIR` | unset | Deploy every `*.py` pipeline in this folder on startup (files starting with `_` are skipped) |
+| `TAU_MAX_CONCURRENT` | `10` | Pipelines this daemon runs at once (more wait for a slot) |
+| `TAU_LOCAL_EXECUTION` | `true` | *Coordinator:* also run pipelines in this process. `false` sends everything to workers |
+| `TAU_COORDINATOR_URL` | unset | *Worker:* register with this coordinator on startup and every heartbeat |
+| `TAU_ADVERTISE_URL` | `http://<hostname>:<port>` | *Worker:* URL the coordinator uses to reach this worker |
+| `TAU_WORKER_ID` | hostname | *Worker:* name shown in `tau workers` |
+| `TAU_COORDINATOR_API_KEY` | `TAU_API_KEY` | *Worker:* key for calling the coordinator |
+| `TAU_HEARTBEAT_INTERVAL` | `15` | Seconds between worker health checks and re-registrations |
 | `TAU_HOST` | `http://localhost:8400` | *CLI only:* which daemon to talk to |
 
 Deployed schedules are restored automatically when the daemon restarts.
@@ -646,6 +678,7 @@ See [`examples/`](examples/):
 | [`view_active_users.py`](examples/view_active_users.py) | View | Reporting view |
 | [`warehouse_etl.py`](examples/warehouse_etl.py) | Multiple | Full warehouse ETL pipeline |
 | [`api_to_warehouse.py`](examples/api_to_warehouse.py) | — | REST API → PostgreSQL |
+| [`distributed/`](examples/distributed/) | — | Coordinator + PostgreSQL + two workers in docker compose |
 
 ---
 
