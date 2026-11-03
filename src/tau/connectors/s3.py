@@ -78,7 +78,9 @@ class S3Connector(Connector):
         **kwargs,
     ) -> int:
         """Write data to S3."""
-        if not self._client or not data:
+        if not self._client:
+            await self.connect()
+        if not data:
             return 0
 
         full_key = f"{self.prefix}/{key}" if self.prefix and key else (key or f"{self.prefix}/data.json")

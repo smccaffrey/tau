@@ -64,8 +64,18 @@ class BigQueryConnector(Connector):
         schema: list | None = None,
         **kwargs,
     ) -> int:
-        """Load data into a BigQuery table."""
-        if not self._client or not data:
+        """Load data into a BigQuery table (append or replace).
+
+        Upsert is not supported here: load into a staging table and use IncrementalConfig.
+        """
+        if mode not in ("append", "replace"):
+            raise ValueError(
+                f"BigQuery load supports mode='append' or 'replace', not '{mode}'. "
+                "For upserts, load into a staging table and materialize with IncrementalConfig."
+            )
+        if not self._client:
+            await self.connect()
+        if not data:
             return 0
 
         from google.cloud.bigquery import LoadJobConfig, WriteDisposition

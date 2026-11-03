@@ -82,24 +82,37 @@ class SnowflakeConnector(Connector):
         data: list[dict],
         table: str,
         mode: str = "append",
+        merge_key: str | list[str] | None = None,
         **kwargs,
     ) -> int:
-        if not self._conn or not data:
-            return 0
+        """Load rows. Upsert deletes rows with the same merge_key and inserts, in one transaction."""
+        from tau.connectors._load import check_load_mode, key_delete_sql
+
+        keys = check_load_mode(mode, merge_key)
+        if not self._conn:
+            await self.connect()
 
         loop = asyncio.get_event_loop()
         def _load():
             cursor = self._conn.cursor()
             try:
+                cursor.execute("BEGIN")
                 if mode == "replace":
                     cursor.execute(f"TRUNCATE TABLE IF EXISTS {table}")
-                columns = list(data[0].keys())
-                col_str = ", ".join(columns)
-                placeholders = ", ".join(["%s"] * len(columns))
-                for record in data:
-                    values = [record.get(c) for c in columns]
-                    cursor.execute(f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})", values)
+                if data:
+                    columns = list(data[0].keys())
+                    if mode == "upsert":
+                        sql, _ = key_delete_sql(table, keys, len(data), lambda i: "%s")
+                        cursor.execute(sql, [r.get(k) for r in data for k in keys])
+                    cursor.executemany(
+                        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})",
+                        [[r.get(c) for c in columns] for r in data],
+                    )
+                cursor.execute("COMMIT")
                 return len(data)
+            except Exception:
+                cursor.execute("ROLLBACK")
+                raise
             finally:
                 cursor.close()
         return await loop.run_in_executor(None, _load)

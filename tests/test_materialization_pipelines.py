@@ -57,7 +57,7 @@ class MockExecutor:
         if qu.startswith("DROP TABLE IF EXISTS"):
             table = q.split("DROP TABLE IF EXISTS")[-1].strip().split()[0].rstrip(";")
             self.tables.pop(table, None)
-        elif qu.startswith(("CREATE TABLE", "CREATE TEMP TABLE")) and " AS " in qu:
+        elif qu.startswith(("CREATE TABLE", "CREATE TEMP TABLE", "CREATE TEMPORARY TABLE")) and " AS " in qu:
             table = q.split(" AS ", 1)[0].split()[-1]
             source = q.split(" AS ", 1)[1].strip()
             self.tables[table] = list(self._resolve(source))
@@ -364,8 +364,8 @@ class TestSCDType1Pipeline:
         assert executor.query_contains("IS DISTINCT FROM")
 
     @pytest.mark.asyncio
-    async def test_scd1_no_tracked_columns_updates_all(self):
-        """When tracked_columns is empty, all rows get updated."""
+    async def test_scd1_no_tracked_columns_compares_all_columns(self):
+        """When tracked_columns is empty, a change in any non-key column updates the row."""
         executor = MockExecutor()
         executor.tables["dim"] = [{"id": 1, "x": "a", "updated_at": "old"}]
         executor.set_query_result("raw", [{"id": 1, "x": "b"}])
@@ -377,9 +377,8 @@ class TestSCDType1Pipeline:
             unique_key="id",
             tracked_columns=[],
         ))
-        # Change check should be TRUE (update all)
         update_queries = [q for q in executor.executed if q.upper().startswith("UPDATE")]
-        assert any("TRUE" in q for q in update_queries)
+        assert any("t.x IS DISTINCT FROM s.x" in q for q in update_queries)
 
 
 # ─── Pipeline + SCD Type 2 ───
@@ -631,8 +630,10 @@ class TestSnapshotPipeline:
         executor = MockExecutor()
         executor.tables["snaps"] = [{"id": 1, "snapshot_at": "old", "snapshot_id": "s1"}]
         executor.set_query_result("raw", [{"id": 1}])
-        # The prune query first SELECTs distinct timestamps, then DELETEs older ones
-        executor.set_query_result("DISTINCT snapshot_at", [{"snapshot_at": "old"}])
+        # The prune query lists snapshots newest first, then DELETEs all but the newest 5
+        executor.set_query_result(
+            "GROUP BY snapshot_id", [{"sid": f"s{i}", "ts": i} for i in range(7, 0, -1)]
+        )
 
         engine = MaterializationEngine(executor)
         await engine.materialize(SnapshotConfig(
@@ -640,8 +641,7 @@ class TestSnapshotPipeline:
             source_query="SELECT * FROM raw",
             retain_snapshots=5,
         ))
-        # Should query for the distinct timestamps with LIMIT
-        assert executor.query_contains("LIMIT 5")
+        assert executor.query_contains("DELETE FROM snaps WHERE snapshot_id IN ('s2', 's1')")
 
     @pytest.mark.asyncio
     async def test_snapshot_no_retention_no_prune(self):

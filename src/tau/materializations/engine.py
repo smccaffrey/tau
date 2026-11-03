@@ -58,13 +58,13 @@ class MaterializationEngine:
         table = config.target_table
         query = config.source_query
 
-        if hasattr(config, 'pre_hook') and config.pre_hook:
+        if getattr(config, "pre_hook", None):
             await self.executor.execute(config.pre_hook)
 
         await self.executor.execute(self._drop_table(table))
         await self.executor.execute(self._create_table_as(table, query))
 
-        if hasattr(config, 'post_hook') and config.post_hook:
+        if getattr(config, "post_hook", None):
             await self.executor.execute(config.post_hook)
 
         count = await self._count_rows(table)
@@ -160,53 +160,59 @@ class MaterializationEngine:
         updated_col = config.updated_at_column
         now = self._current_timestamp()
 
-        staging = f"__staging_{table.replace('.', '_')}"
-        await self.executor.execute(
-            f"CREATE TEMP TABLE {staging} AS SELECT * FROM ({query}) __src"
-        )
-        # The source may already have a column named like updated_at_column (common with
-        # SELECT *). Tau owns that column in the target, so leave the source's copy out.
-        cols = [c for c in await self._get_columns(staging) if c != updated_col]
-        col_list = ", ".join(cols)
-        src_cols = ", ".join(f"s.{c}" for c in cols)
+        staging = await self._stage(table, f"SELECT * FROM ({query}) __src")
+        try:
+            # The source may already have a column named like updated_at_column (common with
+            # SELECT *). Tau owns that column in the target, so leave the source's copy out.
+            cols = [c for c in await self._get_columns(staging) if c != updated_col]
+            col_list = ", ".join(cols)
+            src_cols = ", ".join(f"s.{c}" for c in cols)
 
-        if not await self._table_exists(table):
-            await self.executor.execute(
-                f"CREATE TABLE {table} AS SELECT {src_cols}, {now} AS {updated_col} FROM {staging} s"
-            )
-            await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
-            count = await self._count_rows(table)
-            return {"strategy": "scd_type_1", "table": table, "rows": count, "first_run": True}
+            if not await self._table_exists(table):
+                await self.executor.execute(self._create_table_as(
+                    table, f"SELECT {src_cols}, {now} AS {updated_col} FROM {staging} s"
+                ))
+                count = await self._count_rows(table)
+                return {"strategy": "scd_type_1", "table": table, "rows": count, "first_run": True}
 
-        tracked = config.tracked_columns
-        key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
-        if tracked:
-            change_check = " OR ".join(
-                f"t.{c} IS DISTINCT FROM s.{c}" for c in tracked
-            )
-        else:
-            change_check = "TRUE"  # Update all matching rows
+            tracked = config.tracked_columns or [c for c in cols if c not in unique_key]
+            change_check = " OR ".join(self._distinct(f"t.{c}", f"s.{c}") for c in tracked) or "1 = 1"
+            key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
+            keys = self._key_tuple(unique_key)
 
-        # Update existing rows where tracked columns changed
-        non_key_cols = [c for c in cols if c not in unique_key]
-        update_set = ", ".join([f"{c} = s.{c}" for c in non_key_cols] + [f"{updated_col} = {now}"])
-
-        await self.executor.execute(f"""
-            UPDATE {table} t SET {update_set}
-            FROM {staging} s
-            WHERE {key_join} AND ({change_check})
-        """)
-
-        # Insert new rows
-        await self.executor.execute(f"""
-            INSERT INTO {table} ({col_list}, {updated_col})
-            SELECT {src_cols}, {now}
-            FROM {staging} s
-            LEFT JOIN {table} t ON {key_join}
-            WHERE t.{unique_key[0]} IS NULL
-        """)
-
-        await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+            if self.dialect == "clickhouse":
+                # No UPDATE ... FROM: delete the changed rows, then insert changed + new rows.
+                # A mutation cannot read the table it mutates, so collect the keys first.
+                changed = await self._stage(table, f"""
+                    SELECT {', '.join(f's.{k} AS {k}' for k in unique_key)} FROM {staging} s
+                    INNER JOIN {table} t ON {key_join} WHERE {change_check}
+                """)
+                try:
+                    await self.executor.execute(
+                        f"DELETE FROM {table} WHERE {keys} IN (SELECT {keys} FROM {changed})"
+                    )
+                finally:
+                    await self.executor.execute(self._drop_temp(changed))
+                await self.executor.execute(f"""
+                    INSERT INTO {table} ({col_list}, {updated_col})
+                    SELECT {src_cols}, {now} FROM {staging} s
+                    WHERE {self._key_tuple(unique_key, 's')} NOT IN (SELECT {keys} FROM {table})
+                """)
+            else:
+                non_key_cols = [c for c in cols if c not in unique_key]
+                sets = [(c, f"s.{c}") for c in non_key_cols] + [(updated_col, now)]
+                await self.executor.execute(
+                    self._update_join(table, staging, sets, key_join, f"({change_check})")
+                )
+                await self.executor.execute(f"""
+                    INSERT INTO {table} ({col_list}, {updated_col})
+                    SELECT {src_cols}, {now}
+                    FROM {staging} s
+                    LEFT JOIN {table} t ON {key_join}
+                    WHERE t.{unique_key[0]} IS NULL
+                """)
+        finally:
+            await self.executor.execute(self._drop_temp(staging))
 
         count = await self._count_rows(table)
         return {"strategy": "scd_type_1", "table": table, "rows": count, "first_run": False}
@@ -221,89 +227,77 @@ class MaterializationEngine:
         vt = config.valid_to_column
         ic = config.is_current_column
         hc = config.hash_column
-
-        exists = await self._table_exists(table)
         now = self._current_timestamp()
+        tracked = config.tracked_columns
+        hash_expr = self._build_hash_expression(tracked) if tracked else "'initial'"
 
-        if not exists:
-            # Create initial table with SCD2 columns
-            tracked = config.tracked_columns
-            hash_expr = self._build_hash_expression(tracked) if tracked else "'initial'"
-
-            await self.executor.execute(f"""
-                CREATE TABLE {table} AS
+        if not await self._table_exists(table):
+            await self.executor.execute(self._create_table_as(table, f"""
                 SELECT
                     *,
                     {now} AS {vf},
-                    CAST(NULL AS TIMESTAMP) AS {vt},
+                    {self._null_timestamp()} AS {vt},
                     TRUE AS {ic},
                     {hash_expr} AS {hc}
                 FROM ({query}) __src
-            """)
+            """))
             count = await self._count_rows(table)
             return {"strategy": "scd_type_2", "table": table, "rows": count, "first_run": True}
 
-        # Stage incoming data
-        tracked = config.tracked_columns
-        hash_expr = self._build_hash_expression(tracked) if tracked else "'hash'"
+        staging = await self._stage(
+            table, f"SELECT *, {hash_expr} AS __new_hash FROM ({query}) __src", "__staging_scd2_"
+        )
+        try:
+            key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
+            keys = self._key_tuple(unique_key)
+            src_cols = [c for c in await self._get_columns(staging) if c != "__new_hash"]
+            src_cols_str = ", ".join(f"s.{c}" for c in src_cols)
+            insert_cols = f"{', '.join(src_cols)}, {vf}, {vt}, {ic}, {hc}"
 
-        staging = f"__staging_scd2_{table.replace('.', '_')}"
-        await self.executor.execute(f"""
-            CREATE TEMP TABLE {staging} AS
-            SELECT *, {hash_expr} AS __new_hash
-            FROM ({query}) __src
-        """)
-
-        key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
-
-        # Close changed records (set valid_to, is_current = FALSE)
-        await self.executor.execute(f"""
-            UPDATE {table} t SET
-                {vt} = {now},
-                {ic} = FALSE
-            FROM {staging} s
-            WHERE {key_join}
-                AND t.{ic} = TRUE
-                AND t.{hc} != s.__new_hash
-        """)
-
-        # Insert new versions of changed records
-        all_cols = await self._get_columns(staging)
-        src_cols = [c for c in all_cols if c != "__new_hash"]
-        src_cols_str = ", ".join(f"s.{c}" for c in src_cols)
-
-        await self.executor.execute(f"""
-            INSERT INTO {table} ({', '.join(src_cols)}, {vf}, {vt}, {ic}, {hc})
-            SELECT {src_cols_str}, {now}, NULL, TRUE, s.__new_hash
-            FROM {staging} s
-            INNER JOIN {table} t ON {key_join}
-            WHERE t.{ic} = FALSE
-                AND t.{vt} = {now}
-                AND t.{hc} != s.__new_hash
-        """)
-
-        # Insert brand new records (no match in target)
-        await self.executor.execute(f"""
-            INSERT INTO {table} ({', '.join(src_cols)}, {vf}, {vt}, {ic}, {hc})
-            SELECT {src_cols_str}, {now}, NULL, TRUE, s.__new_hash
-            FROM {staging} s
-            LEFT JOIN {table} t ON {key_join} AND t.{ic} = TRUE
-            WHERE t.{unique_key[0]} IS NULL
-        """)
-
-        # Handle hard deletes
-        if config.invalidate_hard_deletes:
-            await self.executor.execute(f"""
-                UPDATE {table} t SET
-                    {vt} = {now},
-                    {ic} = FALSE
-                WHERE t.{ic} = TRUE
-                AND NOT EXISTS (
-                    SELECT 1 FROM {staging} s WHERE {key_join}
-                )
-            """)
-
-        await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+            if self.dialect == "clickhouse":
+                # Close current rows whose hash changed (synchronous mutation).
+                await self.executor.execute(f"""
+                    ALTER TABLE {table} UPDATE {vt} = {now}, {ic} = FALSE
+                    WHERE {ic} AND {keys} IN (SELECT {keys} FROM {staging})
+                    AND ({', '.join(unique_key)}, {hc}) NOT IN
+                        (SELECT {', '.join(unique_key)}, __new_hash FROM {staging})
+                """)
+                # Insert a current version for every key that has none (new or just closed).
+                await self.executor.execute(f"""
+                    INSERT INTO {table} ({insert_cols})
+                    SELECT {src_cols_str}, {now}, NULL, TRUE, s.__new_hash FROM {staging} s
+                    WHERE {self._key_tuple(unique_key, 's')} NOT IN
+                        (SELECT {keys} FROM {table} WHERE {ic})
+                """)
+                if config.invalidate_hard_deletes:
+                    await self.executor.execute(f"""
+                        ALTER TABLE {table} UPDATE {vt} = {now}, {ic} = FALSE
+                        WHERE {ic} AND {keys} NOT IN (SELECT {keys} FROM {staging})
+                    """)
+            else:
+                # Close current rows whose hash changed.
+                await self.executor.execute(self._update_join(
+                    table, staging, [(vt, now), (ic, "FALSE")], key_join,
+                    f"t.{ic} = TRUE AND t.{hc} <> s.__new_hash",
+                ))
+                # Insert a current version for every key that has none (new or just closed).
+                await self.executor.execute(f"""
+                    INSERT INTO {table} ({insert_cols})
+                    SELECT {src_cols_str}, {now}, NULL, TRUE, s.__new_hash
+                    FROM {staging} s
+                    LEFT JOIN {table} t ON {key_join} AND t.{ic} = TRUE
+                    WHERE t.{unique_key[0]} IS NULL
+                """)
+                if config.invalidate_hard_deletes:
+                    await self.executor.execute(f"""
+                        UPDATE {table} SET {vt} = {now}, {ic} = FALSE
+                        WHERE {ic} = TRUE AND NOT EXISTS (
+                            SELECT 1 FROM {staging} s
+                            WHERE {" AND ".join(f"{table}.{k} = s.{k}" for k in unique_key)}
+                        )
+                    """)
+        finally:
+            await self.executor.execute(self._drop_temp(staging))
 
         count = await self._count_rows(table)
         return {"strategy": "scd_type_2", "table": table, "rows": count, "first_run": False}
@@ -317,26 +311,14 @@ class MaterializationEngine:
         id_col = config.snapshot_id_column
         now = self._current_timestamp()
         snap_id = f"'{str(uuid.uuid4())[:8]}'"
+        select = f"SELECT *, {now} AS {ts_col}, {snap_id} AS {id_col} FROM ({query}) __src"
 
-        exists = await self._table_exists(table)
-
-        if not exists:
-            await self.executor.execute(f"""
-                CREATE TABLE {table} AS
-                SELECT *, {now} AS {ts_col}, {snap_id} AS {id_col}
-                FROM ({query}) __src
-            """)
+        if not await self._table_exists(table):
+            await self.executor.execute(self._create_table_as(table, select))
         else:
-            # Append new snapshot
-            await self.executor.execute(f"""
-                INSERT INTO {table}
-                SELECT *, {now} AS {ts_col}, {snap_id} AS {id_col}
-                FROM ({query}) __src
-            """)
-
-            # Prune old snapshots if retain limit set
+            await self.executor.execute(f"INSERT INTO {table} {select}")
             if config.retain_snapshots:
-                await self._prune_snapshots(table, ts_col, config.retain_snapshots)
+                await self._prune_snapshots(table, id_col, ts_col, config.retain_snapshots)
 
         count = await self._count_rows(table)
         return {"strategy": "snapshot", "table": table, "rows": count, "snapshot_id": snap_id}
@@ -377,23 +359,79 @@ class MaterializationEngine:
         return f"DROP TABLE IF EXISTS {table}"
 
     def _create_table_as(self, table: str, query: str) -> str:
+        if self.dialect == "clickhouse":
+            return f"CREATE TABLE {table} ENGINE = MergeTree ORDER BY tuple() AS {query}"
         return f"CREATE TABLE {table} AS {query}"
+
+    async def _stage(self, table: str, query: str, prefix: str = "__staging_") -> str:
+        """Materialize ``query`` into a staging table and return its name."""
+        if self.dialect == "clickhouse":
+            # Mutations (ALTER UPDATE / DELETE) run server-side and cannot see TEMPORARY
+            # tables, so stage into a real, uniquely named table that is dropped afterwards.
+            name = f"__tau_stage_{uuid.uuid4().hex[:12]}"
+            await self.executor.execute(
+                f"CREATE TABLE {name} ENGINE = MergeTree ORDER BY tuple() AS {query}"
+            )
+            return name
+        name = f"{prefix}{table.replace('.', '_')}"
+        await self.executor.execute(self._drop_temp(name))
+        if self.dialect == "bigquery":
+            await self.executor.execute(f"CREATE TEMP TABLE {name} AS {query}")
+        else:
+            await self.executor.execute(f"CREATE TEMPORARY TABLE {name} AS {query}")
+        return name
+
+    def _drop_temp(self, name: str) -> str:
+        if self.dialect == "mysql":
+            return f"DROP TEMPORARY TABLE IF EXISTS {name}"
+        return f"DROP TABLE IF EXISTS {name}"
+
+    def _null_timestamp(self) -> str:
+        if self.dialect == "mysql":
+            return "CAST(NULL AS DATETIME)"
+        if self.dialect == "clickhouse":
+            return "CAST(NULL AS Nullable(DateTime))"
+        return "CAST(NULL AS TIMESTAMP)"
+
+    def _distinct(self, a: str, b: str) -> str:
+        """Null-safe "a differs from b"."""
+        if self.dialect == "mysql":
+            return f"NOT ({a} <=> {b})"
+        if self.dialect == "clickhouse":
+            return f"NOT (ifNull(({a}) = ({b}), 0) OR (({a}) IS NULL AND ({b}) IS NULL))"
+        return f"{a} IS DISTINCT FROM {b}"
+
+    def _key_tuple(self, keys: list[str], alias: str | None = None) -> str:
+        cols = [f"{alias}.{k}" if alias else k for k in keys]
+        return f"({', '.join(cols)})" if len(cols) > 1 else cols[0]
+
+    def _update_join(self, table: str, staging: str, sets: list[tuple[str, str]],
+                     key_join: str, where: str) -> str:
+        """``UPDATE table t ... FROM staging s`` in the dialect's syntax (not ClickHouse)."""
+        if self.dialect == "mysql":
+            set_sql = ", ".join(f"t.{c} = {v}" for c, v in sets)
+            return f"UPDATE {table} t JOIN {staging} s ON {key_join} SET {set_sql} WHERE {where}"
+        set_sql = ", ".join(f"{c} = {v}" for c, v in sets)
+        return f"UPDATE {table} t SET {set_sql} FROM {staging} s WHERE {key_join} AND {where}"
 
     def _current_timestamp(self) -> str:
         if self.dialect in ("bigquery",):
             return "CURRENT_TIMESTAMP()"
+        if self.dialect == "clickhouse":
+            return "now()"
         return "CURRENT_TIMESTAMP"
 
     def _build_hash_expression(self, columns: list[str]) -> str:
-        concat = " || '|' || ".join(f"COALESCE(CAST({c} AS VARCHAR), '')" for c in columns)
         if self.dialect == "bigquery":
             concat = " || '|' || ".join(f"COALESCE(CAST({c} AS STRING), '')" for c in columns)
-            return f"MD5({concat})"
-        elif self.dialect == "snowflake":
-            return f"MD5({concat})"
-        elif self.dialect == "clickhouse":
-            concat_inner = ", ".join(f"COALESCE(toString({c}), '')" for c in columns)
-            return f"MD5(concat({concat_inner}))"
+            return f"TO_HEX(MD5({concat}))"
+        if self.dialect == "clickhouse":
+            concat_inner = ", '|', ".join(f"COALESCE(toString({c}), '')" for c in columns)
+            return f"lower(hex(MD5(concat({concat_inner}))))"
+        if self.dialect == "mysql":
+            parts = ", ".join(f"COALESCE(CAST({c} AS CHAR), '')" for c in columns)
+            return f"MD5(CONCAT_WS('|', {parts}))"
+        concat = " || '|' || ".join(f"COALESCE(CAST({c} AS VARCHAR), '')" for c in columns)
         return f"MD5({concat})"
 
     async def _table_exists(self, table: str) -> bool:
@@ -405,8 +443,8 @@ class MaterializationEngine:
 
     async def _count_rows(self, table: str) -> int:
         try:
-            rows = await self.executor.extract(f"SELECT COUNT(*) as cnt FROM {table}")
-            return rows[0].get("cnt", rows[0].get("count", 0)) if rows else 0
+            rows = await self.executor.extract(f"SELECT COUNT(*) AS cnt FROM {table}")
+            return int(rows[0].get("cnt", rows[0].get("count", 0))) if rows else 0
         except Exception:
             return -1
 
@@ -417,71 +455,76 @@ class MaterializationEngine:
         return None
 
     async def _get_columns(self, table: str) -> list[str]:
-        rows = await self.executor.extract(f"SELECT * FROM {table} LIMIT 0")
-        # This won't work for empty result sets in all dialects
-        # Fallback: query information_schema or DESCRIBE
-        if not rows:
-            try:
-                if self.dialect in ("postgres", "redshift", "mysql"):
-                    schema_rows = await self.executor.extract(
-                        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table.split('.')[-1]}' ORDER BY ordinal_position"
-                    )
-                    return [r["column_name"] for r in schema_rows]
-                else:
-                    desc_rows = await self.executor.extract(f"DESCRIBE {table}")
-                    return [r.get("column_name", r.get("name", list(r.values())[0])) for r in desc_rows]
-            except Exception:
-                return []
-        return list(rows[0].keys())
+        """Column names of a table or staging table.
+
+        Connectors that can (postgres, redshift, mysql, clickhouse, duckdb) answer exactly via
+        ``get_columns``; otherwise fall back to sampling a row or ``DESCRIBE``.
+        """
+        get_columns = getattr(self.executor, "get_columns", None)
+        if get_columns is not None:
+            return await get_columns(table)
+        rows = await self.executor.extract(f"SELECT * FROM {table} LIMIT 1")
+        if rows:
+            return list(rows[0].keys())
+        try:
+            desc_rows = await self.executor.extract(f"DESCRIBE {table}")
+            return [r.get("column_name", r.get("name", list(r.values())[0])) for r in desc_rows]
+        except Exception:
+            return []
 
     async def _merge_into(self, table: str, source_query: str, unique_key: list[str],
                           on_schema_change: str = "ignore") -> None:
-        staging = f"__merge_staging_{table.replace('.', '_')}"
-        await self.executor.execute(f"CREATE TEMP TABLE {staging} AS SELECT * FROM ({source_query}) __src")
+        if self.dialect == "clickhouse":
+            # ClickHouse has no UPDATE ... FROM: replace matching rows instead.
+            await self._delete_insert(table, source_query, unique_key)
+            return
 
-        key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
-        cols = await self._get_columns(staging)
-        non_key_cols = [c for c in cols if c not in unique_key]
+        staging = await self._stage(table, f"SELECT * FROM ({source_query}) __src", "__merge_staging_")
+        try:
+            key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
+            cols = await self._get_columns(staging)
+            non_key_cols = [c for c in cols if c not in unique_key]
 
-        if non_key_cols:
-            update_set = ", ".join(f"{c} = s.{c}" for c in non_key_cols)
+            if non_key_cols:
+                await self.executor.execute(self._update_join(
+                    table, staging, [(c, f"s.{c}") for c in non_key_cols], key_join, "1 = 1"
+                ))
+
+            col_str = ", ".join(cols)
+            src_col_str = ", ".join(f"s.{c}" for c in cols)
             await self.executor.execute(f"""
-                UPDATE {table} t SET {update_set}
-                FROM {staging} s WHERE {key_join}
+                INSERT INTO {table} ({col_str})
+                SELECT {src_col_str} FROM {staging} s
+                LEFT JOIN {table} t ON {key_join}
+                WHERE t.{unique_key[0]} IS NULL
             """)
-
-        col_str = ", ".join(cols)
-        src_col_str = ", ".join(f"s.{c}" for c in cols)
-        await self.executor.execute(f"""
-            INSERT INTO {table} ({col_str})
-            SELECT {src_col_str} FROM {staging} s
-            LEFT JOIN {table} t ON {key_join}
-            WHERE t.{unique_key[0]} IS NULL
-        """)
-
-        await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+        finally:
+            await self.executor.execute(self._drop_temp(staging))
 
     async def _delete_insert(self, table: str, source_query: str, unique_key: list[str]) -> None:
-        staging = f"__di_staging_{table.replace('.', '_')}"
-        await self.executor.execute(f"CREATE TEMP TABLE {staging} AS SELECT * FROM ({source_query}) __src")
-
-        key_join = " AND ".join(f"{table}.{k} = {staging}.{k}" for k in unique_key)
-        await self.executor.execute(f"DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {staging} WHERE {key_join})")
-
-        await self.executor.execute(f"INSERT INTO {table} SELECT * FROM {staging}")
-        await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+        staging = await self._stage(table, f"SELECT * FROM ({source_query}) __src", "__di_staging_")
+        try:
+            keys = self._key_tuple(unique_key)
+            await self.executor.execute(
+                f"DELETE FROM {table} WHERE {keys} IN (SELECT {keys} FROM {staging})"
+            )
+            cols = ", ".join(await self._get_columns(staging))
+            await self.executor.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {staging}")
+        finally:
+            await self.executor.execute(self._drop_temp(staging))
 
     async def _insert_overwrite(self, table: str, source_query: str, partition_col: str) -> None:
-        staging = f"__io_staging_{table.replace('.', '_')}"
-        await self.executor.execute(f"CREATE TEMP TABLE {staging} AS SELECT * FROM ({source_query}) __src")
-
-        # Delete rows in partitions that appear in source
-        await self.executor.execute(f"""
-            DELETE FROM {table}
-            WHERE {partition_col} IN (SELECT DISTINCT {partition_col} FROM {staging})
-        """)
-        await self.executor.execute(f"INSERT INTO {table} SELECT * FROM {staging}")
-        await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+        staging = await self._stage(table, f"SELECT * FROM ({source_query}) __src", "__io_staging_")
+        try:
+            # Delete rows in partitions that appear in source
+            await self.executor.execute(f"""
+                DELETE FROM {table}
+                WHERE {partition_col} IN (SELECT DISTINCT {partition_col} FROM {staging})
+            """)
+            cols = ", ".join(await self._get_columns(staging))
+            await self.executor.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {staging}")
+        finally:
+            await self.executor.execute(self._drop_temp(staging))
 
     def _create_partitioned_table(self, table: str, query: str, config: PartitionedConfig) -> str:
         base = f"CREATE TABLE {table} AS {query}"
@@ -505,22 +548,14 @@ class MaterializationEngine:
             WHERE {config.partition_by} < CURRENT_DATE - INTERVAL '{days} days'
         """)
 
-    async def _prune_snapshots(self, table: str, ts_col: str, retain: int) -> None:
-        # Use a CTE approach that works across dialects (MySQL doesn't allow LIMIT in subquery of DELETE)
-        try:
-            # Get the cutoff timestamp
-            rows = await self.executor.extract(f"""
-                SELECT DISTINCT {ts_col} FROM {table}
-                ORDER BY {ts_col} DESC
-                LIMIT {retain}
-            """)
-            if rows:
-                # Get the oldest timestamp to keep
-                oldest_keep = rows[-1].get(ts_col)
-                if oldest_keep:
-                    await self.executor.execute(f"""
-                        DELETE FROM {table} WHERE {ts_col} < '{oldest_keep}'
-                    """)
-        except Exception:
-            # Fallback: just skip pruning rather than crash the pipeline
-            pass
+    async def _prune_snapshots(self, table: str, id_col: str, ts_col: str, retain: int) -> None:
+        """Keep the newest ``retain`` snapshots (by snapshot id, so equal timestamps are fine)."""
+        rows = await self.executor.extract(f"""
+            SELECT {id_col} AS sid, MAX({ts_col}) AS ts FROM {table}
+            GROUP BY {id_col} ORDER BY ts DESC
+        """)
+        stale = [r["sid"] for r in rows[retain:]]
+        if stale:
+            ids = ", ".join("'" + str(s).replace("'", "''") + "'" for s in stale)
+            await self.executor.execute(f"DELETE FROM {table} WHERE {id_col} IN ({ids})")
+
