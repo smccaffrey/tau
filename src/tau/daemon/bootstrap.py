@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tau.core.database import get_session
 from tau.pipeline.loader import load_pipeline_from_file
+from tau.repositories.dependency_repo import DependencyRepository
 from tau.repositories.pipeline_repo import PipelineRepository
 
 logger = logging.getLogger("tau.bootstrap")
@@ -47,9 +48,13 @@ async def autodeploy(directory: str | Path) -> list[str]:
         logger.warning(f"TAU_AUTODEPLOY_DIR {path} does not exist; skipping auto-deploy")
         return []
 
+    from tau.api.dag import get_dag
+    from tau.dag.resolver import CycleError
+
     deployed: list[str] = []
     async for session in get_session():
         repo = PipelineRepository(session)
+        deps = DependencyRepository(session)
         for file in sorted(path.glob("*.py")):
             if file.name.startswith("_"):
                 continue
@@ -75,5 +80,11 @@ async def autodeploy(directory: str | Path) -> list[str]:
                 else:
                     pipeline = await repo.create(name=meta["name"], filename=file.name, **fields)
                 _sync_schedule(pipeline)
+                if meta.get("depends_on"):
+                    try:
+                        get_dag().set_upstream(meta["name"], list(meta["depends_on"]))
+                        await deps.set_upstream(meta["name"], list(meta["depends_on"]))
+                    except CycleError as e:
+                        logger.error(f"Ignoring depends_on of {meta['name']}: {e}")
                 deployed.append(meta["name"])
     return deployed

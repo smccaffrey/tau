@@ -231,21 +231,24 @@ Or set via CLI:
 ```bash
 tau depends fct_orders --on stage_orders --on dim_customers
 tau dag  # View the full DAG
+tau dag --run [--from stage_orders]  # Run it in dependency order
 ```
 
-Tau resolves the graph into parallel execution groups. Pipelines with no unmet dependencies run concurrently. If upstream fails, downstream is skipped.
+Tau resolves the graph into parallel execution groups. Pipelines with no unmet dependencies run concurrently. If upstream fails, downstream is skipped. When a scheduled pipeline succeeds, its downstream dependents run right after it, so only roots need a schedule.
 
 ## Workers
 
 Single machine (default): pipelines run in the daemon process with concurrency control.
 
-Distributed: register remote `taud` instances as workers. The coordinator dispatches to the least-loaded worker.
+Distributed: workers are `taud` instances started with `TAU_COORDINATOR_URL`; they register themselves. Every run goes to the least-loaded online worker and fails over if a worker is unreachable. Pipeline code runs on the worker, so `ctx.secret()` values and `tau.toml` connections must exist there. See `examples/distributed/`.
 
 ```bash
 tau workers  # View worker pool status
 ```
 
 ## CLI Commands You Use
+
+Put `--json` before any command (`tau --json runs my_pipeline`) to get the raw JSON response. `tau run` exits 1 when the run fails or times out.
 
 ```bash
 # Deploy a pipeline file to the daemon
@@ -283,6 +286,7 @@ tau heal <name> [--auto]                    # Diagnose + fix failures
 
 # DAG
 tau dag                                     # View the pipeline DAG
+tau dag --run [--from <name>]               # Run the DAG (or one subtree)
 tau depends <name>                          # Show dependencies
 tau depends <name> --on dep1 --on dep2      # Set dependencies
 

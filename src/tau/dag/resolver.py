@@ -43,6 +43,38 @@ class DAGResolver:
         for dep in depends_on:
             self.add_dependency(upstream=dep, downstream=pipeline)
 
+    def remove_pipeline(self, name: str) -> None:
+        """Remove a node and every edge touching it."""
+        node = self._nodes.pop(name, None)
+        if node is None:
+            return
+        for up in node.upstream:
+            if up in self._nodes:
+                self._nodes[up].downstream.discard(name)
+        for down in node.downstream:
+            if down in self._nodes:
+                self._nodes[down].upstream.discard(name)
+
+    def set_upstream(self, pipeline: str, depends_on: list[str]) -> None:
+        """Replace every upstream edge of ``pipeline``.
+
+        Raises CycleError (and leaves the graph unchanged) if the new edges form a cycle.
+        """
+        self.add_pipeline(pipeline)
+        old = set(self._nodes[pipeline].upstream)
+        for up in old:
+            self._nodes[up].downstream.discard(pipeline)
+        self._nodes[pipeline].upstream.clear()
+        self.add_dependencies(pipeline, depends_on)
+        cycle = self.detect_cycles()
+        if cycle:
+            for up in depends_on:
+                self._nodes[up].downstream.discard(pipeline)
+            self._nodes[pipeline].upstream.clear()
+            for up in old:
+                self.add_dependency(up, pipeline)
+            raise CycleError(cycle)
+
     @property
     def nodes(self) -> dict[str, DAGNode]:
         return self._nodes

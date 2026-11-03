@@ -4,10 +4,11 @@ from typing import Dict
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
+from tau.core.auth import verify_api_key
 from tau.core.config import get_settings
 from tau.connections.registry import ConnectionRegistry
 
-router = APIRouter(prefix="/connections", tags=["connections"])
+router = APIRouter(prefix="/connections", tags=["connections"], dependencies=[Depends(verify_api_key)])
 
 
 class ConnectionTestResponse(BaseModel):
@@ -21,7 +22,7 @@ def get_connection_registry() -> ConnectionRegistry:
     return ConnectionRegistry(settings.connections)
 
 
-@router.get("/")
+@router.get("")
 async def list_connections(
     registry: ConnectionRegistry = Depends(get_connection_registry),
 ) -> Dict[str, Dict[str, str]]:

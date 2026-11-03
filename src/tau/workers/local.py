@@ -25,20 +25,26 @@ class LocalWorker:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_runs: dict[str, asyncio.Task] = {}  # run_id → task
         self._status = "idle"
+        self._queued = 0
 
     @property
     def status(self) -> str:
-        if self._active_runs:
+        if self.current_load:
             return "busy"
         return self._status
 
     @property
     def current_load(self) -> int:
-        return len(self._active_runs)
+        """Running plus waiting runs."""
+        return len(self._active_runs) + self._queued
+
+    @property
+    def queued(self) -> int:
+        return self._queued
 
     @property
     def capacity(self) -> int:
-        return self.max_concurrent - self.current_load
+        return max(0, self.max_concurrent - self.current_load)
 
     async def execute(
         self,
@@ -48,25 +54,31 @@ class LocalWorker:
         params: dict | None = None,
         timeout_seconds: int = 1800,
         last_successful_run: datetime | None = None,
+        retry_count: int = 0,
     ) -> ExecutionResult:
-        """Execute a pipeline with concurrency control."""
-        async with self._semaphore:
-            task = asyncio.current_task()
-            self._active_runs[run_id] = task
-            try:
-                logger.info(f"[{self.worker_id}] Executing {pipeline_name} (run={run_id})")
-                result = await execute_pipeline(
-                    pipeline_name=pipeline_name,
-                    code=code,
-                    run_id=run_id,
-                    params=params,
-                    timeout_seconds=timeout_seconds,
-                    last_successful_run=last_successful_run,
-                )
-                logger.info(f"[{self.worker_id}] Finished {pipeline_name}: {result.status}")
-                return result
-            finally:
-                self._active_runs.pop(run_id, None)
+        """Execute a pipeline with concurrency control (waits for a free slot)."""
+        self._queued += 1
+        try:
+            await self._semaphore.acquire()
+        finally:
+            self._queued -= 1
+        self._active_runs[run_id] = asyncio.current_task()
+        try:
+            logger.info(f"[{self.worker_id}] Executing {pipeline_name} (run={run_id})")
+            result = await execute_pipeline(
+                pipeline_name=pipeline_name,
+                code=code,
+                run_id=run_id,
+                params=params,
+                timeout_seconds=timeout_seconds,
+                last_successful_run=last_successful_run,
+                retry_count=retry_count,
+            )
+            logger.info(f"[{self.worker_id}] Finished {pipeline_name}: {result.status}")
+            return result
+        finally:
+            self._active_runs.pop(run_id, None)
+            self._semaphore.release()
 
     async def cancel(self, run_id: str) -> bool:
         """Cancel a running pipeline."""
@@ -84,5 +96,6 @@ class LocalWorker:
             "status": self.status,
             "max_concurrent": self.max_concurrent,
             "current_load": self.current_load,
+            "queued": self._queued,
             "active_runs": list(self._active_runs.keys()),
         }

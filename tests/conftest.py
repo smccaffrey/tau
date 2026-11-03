@@ -7,8 +7,15 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tau.core.database import init_engine, create_tables, async_session_factory, Base
+from tau.core import database
+from tau.core.database import init_engine, create_tables, Base
 from tau.daemon.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch):
+    """Retry backoff is real seconds in production; skip the waiting in tests."""
+    monkeypatch.setattr("tau.daemon.executor.RETRY_BACKOFF_BASE", 0.0)
 
 
 @pytest.fixture(scope="session")
@@ -62,7 +69,7 @@ async def unauthed_client(app):
 @pytest_asyncio.fixture(scope="function")
 async def db_session() -> AsyncSession:
     """Get a database session for direct DB operations in tests."""
-    async with async_session_factory() as session:
+    async with database.async_session_factory() as session:
         yield session
 
 

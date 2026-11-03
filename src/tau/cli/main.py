@@ -21,34 +21,67 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+_state = {"json": False}
 
 
-def _client() -> httpx.Client:
+@app.callback()
+def _main(
+    json_output: bool = typer.Option(
+        False, "--json", envvar="TAU_JSON",
+        help="Print the raw JSON response of every command (for scripts and AI agents).",
+    ),
+):
+    """AI-native data pipeline orchestration."""
+    _state["json"] = json_output
+
+
+def _emit(data) -> bool:
+    """In --json mode print ``data`` as JSON and return True (the caller then stops)."""
+    if _state["json"]:
+        print(json.dumps(data, default=str, indent=2))
+        return True
+    return False
+
+
+def _fail(message: str, status_code: int | None = None):
+    if _state["json"]:
+        print(json.dumps({"error": message, "status_code": status_code}))
+    else:
+        prefix = f"Error {status_code}" if status_code else "Error"
+        console.print(f"[red]{prefix}:[/red] {message}")
+    raise typer.Exit(1)
+
+
+def _client(timeout: float | None = 120) -> httpx.Client:
     settings = get_client_settings()
     return httpx.Client(
         base_url=settings.host,
         headers={"Authorization": f"Bearer {settings.api_key}"},
-        timeout=120,
+        timeout=httpx.Timeout(timeout, connect=10.0),
+        follow_redirects=True,
     )
 
 
-def _api(method: str, path: str, **kwargs) -> dict:
-    """Make an API call to the daemon."""
-    with _client() as client:
+def _api(method: str, path: str, timeout: float | None = 120, **kwargs) -> dict:
+    """Make an API call to the daemon. ``timeout=None`` waits as long as it takes (runs)."""
+    with _client(timeout) as client:
         try:
             resp = client.request(method, f"/api/v1{path}", **kwargs)
         except httpx.ConnectError:
             settings = get_client_settings()
-            console.print(f"[red]Error:[/red] Cannot connect to Tau daemon at {settings.host}")
-            console.print("Start the daemon with: [bold]taud[/bold]")
-            raise typer.Exit(1)
+            _fail(f"Cannot connect to Tau daemon at {settings.host}. Start it with: taud")
 
         if resp.status_code >= 400:
             detail = resp.json().get("detail", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-            console.print(f"[red]Error {resp.status_code}:[/red] {detail}")
-            raise typer.Exit(1)
+            _fail(str(detail), resp.status_code)
 
         return resp.json()
+
+
+def _pipeline_name_from_code(code: str, fallback: str) -> str:
+    from tau.pipeline.loader import find_pipeline_metadata
+
+    return find_pipeline_metadata(code).get("name") or fallback
 
 
 # ─── Pipeline Commands ───
@@ -63,20 +96,13 @@ def deploy(
 ):
     """Deploy a pipeline to the daemon."""
     if not file.exists():
-        console.print(f"[red]Error:[/red] File not found: {file}")
-        raise typer.Exit(1)
+        _fail(f"File not found: {file}")
 
     code = file.read_text()
 
-    # Try to extract pipeline name from code
+    # The daemon reads schedule, retry, timeout, tags and depends_on from the decorator.
     if name is None:
-        # Look for @pipeline(name="...") in the code
-        import re
-        match = re.search(r'@pipeline\([^)]*name\s*=\s*["\']([^"\']+)["\']', code)
-        if match:
-            name = match.group(1)
-        else:
-            name = file.stem
+        name = _pipeline_name_from_code(code, file.stem)
 
     data = {
         "name": name,
@@ -89,9 +115,15 @@ def deploy(
         data["description"] = description
 
     result = _api("POST", "/pipelines", json=data)
+    if _emit(result):
+        return
     console.print(f"[green]✓[/green] Deployed pipeline: [bold]{result['name']}[/bold]")
     if result.get("schedule_cron"):
         console.print(f"  Schedule: {result['schedule_cron']}")
+    if result.get("schedule_interval"):
+        console.print(f"  Every: {result['schedule_interval']}s")
+    if result.get("depends_on"):
+        console.print(f"  Depends on: {', '.join(result['depends_on'])}")
 
 
 @app.command()
@@ -99,26 +131,37 @@ def run(
     name: str = typer.Argument(..., help="Pipeline name to run"),
     params: Optional[str] = typer.Option(None, "--params", "-p", help="JSON params"),
 ):
-    """Trigger a pipeline run."""
+    """Run a pipeline and wait for the result (exit status 1 if it did not succeed)."""
     parsed_params = json.loads(params) if params else None
-    result = _api("POST", f"/pipelines/{name}/run", json=parsed_params)
-
+    result = _api("POST", f"/pipelines/{name}/run", json=parsed_params, timeout=None)
     status = result["status"]
+    if _emit(result):
+        raise typer.Exit(0 if status == "success" else 1)
+
     color = "green" if status == "success" else "red" if status == "failed" else "yellow"
 
     console.print(f"\n[{color}]●[/{color}] {result['pipeline_name']} — {status}")
-    if result.get("duration_ms"):
+    if result.get("duration_ms") is not None:
         console.print(f"  Duration: {result['duration_ms']}ms")
+    trace = result.get("trace") or {}
+    if trace.get("worker_id"):
+        console.print(f"  Worker: {trace['worker_id']}")
+    if (trace.get("attempts") or 1) > 1:
+        console.print(f"  Attempts: {trace['attempts']}")
     if result.get("error"):
         console.print(f"  [red]Error:[/red] {result['error'][:200]}")
     if result.get("result"):
         console.print(f"  Result: {json.dumps(result['result'], indent=2)}")
+    if status != "success":
+        raise typer.Exit(1)
 
 
 @app.command(name="list")
 def list_pipelines():
     """List all registered pipelines."""
     result = _api("GET", "/pipelines")
+    if _emit(result):
+        return
     pipelines = result["pipelines"]
 
     if not pipelines:
@@ -140,7 +183,7 @@ def list_pipelines():
         table.add_row(
             p["name"],
             f"[{status_color}]{p['status']}[/{status_color}]",
-            p.get("schedule_cron") or "—",
+            p.get("schedule_cron") or (f"every {p['schedule_interval']}s" if p.get("schedule_interval") else "—"),
             p.get("last_run_at", "—") or "—",
             f"[{ls_color}]{last_status}[/{ls_color}]",
         )
@@ -152,6 +195,8 @@ def list_pipelines():
 def show(name: str = typer.Argument(..., help="Pipeline name")):
     """Show pipeline details."""
     result = _api("GET", f"/pipelines/{name}")
+    if _emit(result):
+        return
     rprint(Panel(json.dumps(result, indent=2, default=str), title=f"Pipeline: {name}"))
 
 
@@ -159,13 +204,17 @@ def show(name: str = typer.Argument(..., help="Pipeline name")):
 def code(name: str = typer.Argument(..., help="Pipeline name")):
     """Show pipeline source code."""
     result = _api("GET", f"/pipelines/{name}/code")
+    if _emit(result):
+        return
     console.print(Syntax(result["code"], "python", theme="monokai", line_numbers=True))
 
 
 @app.command()
 def undeploy(name: str = typer.Argument(..., help="Pipeline name to remove")):
     """Remove a pipeline from the daemon."""
-    _api("DELETE", f"/pipelines/{name}")
+    result = _api("DELETE", f"/pipelines/{name}")
+    if _emit(result):
+        return
     console.print(f"[green]✓[/green] Removed pipeline: [bold]{name}[/bold]")
 
 
@@ -190,6 +239,8 @@ def inspect(
         "error": result.get("error"),
         "trace": result.get("trace"),
     }
+    if _emit(output):
+        return
     console.print_json(json.dumps(output, default=str))
 
 
@@ -206,6 +257,8 @@ def logs(
         run = _api("GET", f"/runs/{name}/last")
         result = _api("GET", f"/runs/{name}/{run['id']}/logs")
 
+    if _emit(result):
+        return
     if result.get("logs"):
         console.print(result["logs"])
     else:
@@ -216,6 +269,8 @@ def logs(
 def errors(limit: int = typer.Option(20, "--limit", "-l", help="Number of errors to show")):
     """Show recent failures across all pipelines."""
     result = _api("GET", f"/runs/errors?limit={limit}")
+    if _emit(result):
+        return
     runs = result["runs"]
 
     if not runs:
@@ -223,7 +278,7 @@ def errors(limit: int = typer.Option(20, "--limit", "-l", help="Number of errors
         return
 
     for r in runs:
-        console.print(f"\n[red]●[/red] {r['pipeline_name']} — {r.get('created_at', '')}")
+        console.print(f"\n[red]●[/red] {r['pipeline_name']} — {r['status']} — {r.get('created_at', '')}")
         if r.get("error"):
             console.print(f"  {r['error'][:200]}")
 
@@ -237,13 +292,16 @@ def schedule(
 ):
     """Set or update pipeline schedule."""
     if disable:
-        _api("POST", f"/pipelines/{name}/schedule")
+        result = _api("POST", f"/pipelines/{name}/schedule")
+        if _emit(result):
+            return
         console.print(f"[yellow]Schedule disabled for {name}[/yellow]")
         return
 
     if not cron and not every:
-        console.print("[red]Provide a cron expression or --every interval[/red]")
-        raise typer.Exit(1)
+        _fail("Provide a cron expression or --every interval")
+    if cron and every:
+        _fail("Provide a cron expression or --every interval, not both")
 
     params = {}
     if cron:
@@ -251,7 +309,9 @@ def schedule(
     if every:
         params["interval_seconds"] = every
 
-    _api("POST", f"/pipelines/{name}/schedule", params=params)
+    result = _api("POST", f"/pipelines/{name}/schedule", params=params)
+    if _emit(result):
+        return
     console.print(f"[green]✓[/green] Schedule updated for [bold]{name}[/bold]")
     if cron:
         console.print(f"  Cron: {cron}")
@@ -266,6 +326,8 @@ def runs(
 ):
     """Show recent runs for a pipeline."""
     result = _api("GET", f"/runs/{name}?limit={last}")
+    if _emit(result):
+        return
 
     table = Table(title=f"Runs: {name}")
     table.add_column("ID", style="dim", max_width=8)
@@ -277,7 +339,7 @@ def runs(
     for r in result["runs"]:
         status = r["status"]
         color = "green" if status == "success" else "red" if status == "failed" else "yellow"
-        duration = f"{r['duration_ms']}ms" if r.get("duration_ms") else "—"
+        duration = f"{r['duration_ms']}ms" if r.get("duration_ms") is not None else "—"
 
         table.add_row(
             r["id"][:8],
@@ -314,9 +376,7 @@ def create(
 
         if deploy_now:
             # Extract name from generated code
-            import re
-            match = re.search(r'@pipeline\([^)]*name\s*=\s*["\']([^"\']+)["\']', code)
-            name = match.group(1) if match else "generated_pipeline"
+            name = _pipeline_name_from_code(code, "generated_pipeline")
 
             data = {"name": name, "code": code}
             if schedule:
@@ -346,11 +406,11 @@ def heal(
         # Get last failed run
         try:
             run = _api("GET", f"/runs/{name}/last")
-        except SystemExit:
+        except typer.Exit:
             console.print("[red]No runs found to diagnose[/red]")
             return
 
-        if run["status"] != "failed":
+        if run["status"] not in ("failed", "timeout"):
             console.print(f"[green]Last run was {run['status']}[/green] — nothing to heal")
             return
 
@@ -360,7 +420,7 @@ def heal(
                 pipeline_code=code,
                 error=run.get("error", ""),
                 trace=run.get("trace"),
-                logs=run.get("logs"),  # Fixed: was missing from RunResponse
+                logs=_api("GET", f"/runs/{name}/{run['id']}/logs").get("logs"),
             )
 
         console.print(f"\n[bold]Diagnosis:[/bold] {diagnosis.get('diagnosis', 'Unknown')}")
@@ -384,7 +444,7 @@ def heal(
 
                 # Run it to verify
                 console.print("Running healed pipeline...")
-                run_result = _api("POST", f"/pipelines/{name}/run")
+                run_result = _api("POST", f"/pipelines/{name}/run", timeout=None)
                 status = run_result["status"]
                 color = "green" if status == "success" else "red"
                 console.print(f"[{color}]●[/{color}] Result: {status}")
@@ -399,9 +459,34 @@ def heal(
 # ─── DAG Commands ───
 
 @app.command()
-def dag():
-    """Show the pipeline dependency DAG."""
+def dag(
+    run: bool = typer.Option(False, "--run", help="Run the DAG in dependency order"),
+    root: Optional[str] = typer.Option(None, "--from", help="With --run: only this pipeline and its downstream"),
+):
+    """Show the pipeline dependency DAG, or run it with --run."""
+    if run:
+        params = {"root": root} if root else {}
+        result = _api("POST", "/dag/run", params=params, timeout=None)
+        ok = result["status"] == "success"
+        if _emit(result):
+            raise typer.Exit(0 if ok else 1)
+        color = "green" if ok else "red"
+        console.print(f"[{color}]●[/{color}] DAG — {result['status']} ({result.get('duration_ms')}ms)")
+        for i, group in enumerate(result.get("execution_order", [])):
+            cells = []
+            for n in group:
+                r = result["results"].get(n)
+                if r is None:
+                    cells.append(f"[dim]{n} (skipped)[/dim]")
+                else:
+                    c = "green" if r.get("status") == "success" else "red"
+                    cells.append(f"[{c}]{n} ({r.get('status')})[/{c}]")
+            console.print(f"  Level {i}: " + "  ".join(cells))
+        raise typer.Exit(0 if ok else 1)
+
     result = _api("GET", "/dag")
+    if _emit(result):
+        return
 
     if not result.get("nodes"):
         console.print("[dim]No dependencies defined[/dim]")
@@ -429,6 +514,9 @@ def depends(
         # Show current dependencies
         result = _api("GET", f"/dag/{name}/upstream")
         upstream = result.get("upstream", [])
+        down = _api("GET", f"/dag/{name}/downstream")
+        if _emit({"pipeline": name, "upstream": upstream, "downstream": down.get("downstream", [])}):
+            return
         if upstream:
             console.print(f"[bold]{name}[/bold] depends on: {', '.join(upstream)}")
         else:
@@ -444,6 +532,8 @@ def depends(
         "pipeline": name,
         "depends_on": on,
     })
+    if _emit(result):
+        return
     console.print(f"[green]✓[/green] {name} depends on: {', '.join(on)}")
 
 
@@ -457,21 +547,25 @@ def connections(
     if test:
         # Test specific connection
         result = _api("POST", f"/connections/{test}/test")
+        if _emit(result):
+            raise typer.Exit(0 if result.get("success") else 1)
         status = "✓" if result.get("success") else "✗"
         color = "green" if result.get("success") else "red"
         message = result.get("message", "")
         console.print(f"[{color}]{status}[/{color}] {test} — {message}")
-        return
+        raise typer.Exit(0 if result.get("success") else 1)
 
     # List all connections
     result = _api("GET", "/connections")
+    if _emit(result):
+        return
     connections_list = result.get("connections", {})
 
     if not connections_list:
         console.print("[dim]No connections configured[/dim]")
         console.print("Configure connections in tau.toml:")
         console.print()
-        console.print("[dim]  [connections.warehouse][/dim]")
+        console.print("[dim]  \\[connections.warehouse][/dim]")
         console.print("[dim]  type = \"postgres\"[/dim]")
         console.print("[dim]  dsn = \"postgresql://user:pass@localhost/db\"[/dim]")
         return
@@ -494,6 +588,8 @@ def connections(
 def workers():
     """Show worker pool status."""
     result = _api("GET", "/workers")
+    if _emit(result):
+        return
     workers_list = result.get("workers", [])
 
     if not workers_list:
@@ -514,7 +610,8 @@ def workers():
             w["worker_id"],
             w["type"],
             f"[{color}]{status}[/{color}]",
-            f"{w['current_load']}/{w['max_concurrent']}",
+            f"{w['current_load'] - w.get('queued', 0)}/{w['max_concurrent']}"
+            + (f" (+{w['queued']} queued)" if w.get("queued") else ""),
             w.get("host", "local"),
         )
 
@@ -539,6 +636,8 @@ def dashboard():
 @app.command()
 def version():
     """Show Tau version."""
+    if _emit({"version": __version__}):
+        return
     console.print(f"tau-pipelines v{__version__}")
 
 
@@ -549,6 +648,8 @@ def status():
         try:
             resp = client.get("/health")
             data = resp.json()
+            if _emit(data):
+                return
             console.print(f"[green]●[/green] Tau daemon v{data['version']} — running")
             jobs = data.get("scheduler_jobs", [])
             if jobs:
@@ -559,7 +660,11 @@ def status():
                 console.print("  No scheduled jobs")
         except httpx.ConnectError:
             settings = get_client_settings()
-            console.print(f"[red]●[/red] Daemon not running at {settings.host}")
+            if _state["json"]:
+                print(json.dumps({"status": "unreachable", "host": settings.host}))
+            else:
+                console.print(f"[red]●[/red] Daemon not running at {settings.host}")
+            raise typer.Exit(1)
 
 
 if __name__ == "__main__":

@@ -158,29 +158,27 @@ class MaterializationEngine:
         query = config.source_query
         unique_key = self._normalize_keys(config.unique_key)
         updated_col = config.updated_at_column
+        now = self._current_timestamp()
 
-        exists = await self._table_exists(table)
-
-        if not exists:
-            # Create with updated_at column
-            await self.executor.execute(
-                f"""CREATE TABLE {table} AS
-                SELECT *, {self._current_timestamp()} AS {updated_col}
-                FROM ({query}) __src"""
-            )
-            count = await self._count_rows(table)
-            return {"strategy": "scd_type_1", "table": table, "rows": count, "first_run": True}
-
-        # Get source columns for tracked columns comparison
-        tracked = config.tracked_columns
-
-        # Merge: update changed rows, insert new ones
         staging = f"__staging_{table.replace('.', '_')}"
         await self.executor.execute(
             f"CREATE TEMP TABLE {staging} AS SELECT * FROM ({query}) __src"
         )
+        # The source may already have a column named like updated_at_column (common with
+        # SELECT *). Tau owns that column in the target, so leave the source's copy out.
+        cols = [c for c in await self._get_columns(staging) if c != updated_col]
+        col_list = ", ".join(cols)
+        src_cols = ", ".join(f"s.{c}" for c in cols)
 
-        # Update existing rows where tracked columns changed
+        if not await self._table_exists(table):
+            await self.executor.execute(
+                f"CREATE TABLE {table} AS SELECT {src_cols}, {now} AS {updated_col} FROM {staging} s"
+            )
+            await self.executor.execute(f"DROP TABLE IF EXISTS {staging}")
+            count = await self._count_rows(table)
+            return {"strategy": "scd_type_1", "table": table, "rows": count, "first_run": True}
+
+        tracked = config.tracked_columns
         key_join = " AND ".join(f"t.{k} = s.{k}" for k in unique_key)
         if tracked:
             change_check = " OR ".join(
@@ -189,11 +187,9 @@ class MaterializationEngine:
         else:
             change_check = "TRUE"  # Update all matching rows
 
-        # Get all columns from staging
-        cols = await self._get_columns(staging)
+        # Update existing rows where tracked columns changed
         non_key_cols = [c for c in cols if c not in unique_key]
-        update_set = ", ".join(f"{c} = s.{c}" for c in non_key_cols)
-        update_set += f", {updated_col} = {self._current_timestamp()}"
+        update_set = ", ".join([f"{c} = s.{c}" for c in non_key_cols] + [f"{updated_col} = {now}"])
 
         await self.executor.execute(f"""
             UPDATE {table} t SET {update_set}
@@ -203,8 +199,8 @@ class MaterializationEngine:
 
         # Insert new rows
         await self.executor.execute(f"""
-            INSERT INTO {table}
-            SELECT s.*, {self._current_timestamp()} AS {updated_col}
+            INSERT INTO {table} ({col_list}, {updated_col})
+            SELECT {src_cols}, {now}
             FROM {staging} s
             LEFT JOIN {table} t ON {key_join}
             WHERE t.{unique_key[0]} IS NULL

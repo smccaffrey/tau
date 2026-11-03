@@ -5,20 +5,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tau.core.database import get_session
 from tau.core.auth import verify_api_key
+from tau.dag.resolver import CycleError
+from tau.pipeline.loader import find_pipeline_metadata
+from tau.repositories.dependency_repo import DependencyRepository
 from tau.repositories.pipeline_repo import PipelineRepository
 from tau.repositories.run_repo import RunRepository
 from tau.schemas.pipeline import (
     PipelineCreate, PipelineResponse,
     PipelineListResponse, PipelineCodeResponse,
 )
-from tau.daemon.executor import execute_pipeline
-from tau.daemon.scheduler import add_cron_job, add_interval_job, remove_job
-from tau.models.run import RunStatus
+from tau.daemon.runner import run_pipeline as _run_pipeline
+from tau.daemon.scheduler import add_cron_job, add_interval_job, remove_job, validate_cron
 from tau.schemas.run import RunResponse
 
-import uuid
-
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
+
+DEFAULT_RETRY_COUNT = 3
+DEFAULT_TIMEOUT_SECONDS = 1800
+
+
+def _check_schedule(cron: str | None, interval_seconds: int | None) -> None:
+    if cron:
+        try:
+            validate_cron(cron)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid cron expression '{cron}': {e}")
+    if interval_seconds is not None and interval_seconds <= 0:
+        raise HTTPException(400, "interval_seconds must be positive")
 
 
 @router.post("", response_model=PipelineResponse)
@@ -27,37 +40,55 @@ async def deploy_pipeline(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Deploy (create or update) a pipeline."""
+    """Deploy (create or update) a pipeline.
+
+    Fields missing from the request are taken from the code's ``@pipeline(...)`` arguments
+    (description, schedule, tags, retry, timeout, depends_on), so ``tau deploy file.py``
+    honours the decorator.
+    """
+    meta = find_pipeline_metadata(data.code, data.name)
+    fields = dict(
+        code=data.code,
+        description=data.description if data.description is not None else meta.get("description"),
+        tags=data.tags if data.tags is not None else meta.get("tags"),
+        schedule_cron=data.schedule_cron,
+        schedule_interval=data.schedule_interval,
+        retry_count=data.retry_count if data.retry_count is not None else meta.get("retry"),
+        timeout_seconds=data.timeout_seconds if data.timeout_seconds is not None else meta.get("timeout_seconds"),
+    )
+    if data.schedule_cron is None and data.schedule_interval is None:
+        fields["schedule_cron"] = meta.get("schedule")
+    depends_on = data.depends_on if data.depends_on is not None else meta.get("depends_on")
+    _check_schedule(fields["schedule_cron"], fields["schedule_interval"])
+
+    if depends_on is not None:
+        from tau.api.dag import get_dag
+
+        try:
+            get_dag().set_upstream(data.name, list(depends_on))
+        except CycleError as e:
+            raise HTTPException(400, str(e))
+
     repo = PipelineRepository(session)
     existing = await repo.get_by_name(data.name)
 
     if existing:
-        pipeline = await repo.update(
-            existing,
-            code=data.code,
-            description=data.description,
-            tags=data.tags,
-            schedule_cron=data.schedule_cron,
-            schedule_interval=data.schedule_interval,
-            retry_count=data.retry_count,
-            timeout_seconds=data.timeout_seconds,
-        )
+        pipeline = await repo.update(existing, **fields)
+        if data.schedule_cron is not None or data.schedule_interval is not None:
+            # An explicit schedule replaces the other kind (cron vs interval).
+            pipeline = await repo.set_schedule(pipeline, data.schedule_cron, data.schedule_interval)
     else:
-        pipeline = await repo.create(
-            name=data.name,
-            code=data.code,
-            description=data.description,
-            filename=data.filename,
-            tags=data.tags,
-            schedule_cron=data.schedule_cron,
-            schedule_interval=data.schedule_interval,
-            retry_count=data.retry_count,
-            timeout_seconds=data.timeout_seconds,
-        )
+        fields["retry_count"] = fields["retry_count"] if fields["retry_count"] is not None else DEFAULT_RETRY_COUNT
+        if fields["timeout_seconds"] is None:
+            fields["timeout_seconds"] = DEFAULT_TIMEOUT_SECONDS
+        pipeline = await repo.create(name=data.name, filename=data.filename, **fields)
 
-    # Update scheduler if schedule is set
+    deps = DependencyRepository(session)
+    if depends_on is not None:
+        await deps.set_upstream(data.name, list(depends_on))
+
     _sync_schedule(pipeline)
-
+    pipeline.depends_on = await deps.upstream_of(pipeline.name)
     return pipeline
 
 
@@ -69,6 +100,11 @@ async def list_pipelines(
     """List all pipelines."""
     repo = PipelineRepository(session)
     pipelines = await repo.list_all()
+    upstream: dict[str, list[str]] = {}
+    for up, down in await DependencyRepository(session).list_edges():
+        upstream.setdefault(down, []).append(up)
+    for p in pipelines:
+        p.depends_on = sorted(upstream.get(p.name, []))
     return PipelineListResponse(pipelines=pipelines, total=len(pipelines))
 
 
@@ -83,6 +119,7 @@ async def get_pipeline(
     pipeline = await repo.get_by_name(name)
     if not pipeline:
         raise HTTPException(404, f"Pipeline '{name}' not found")
+    pipeline.depends_on = await DependencyRepository(session).upstream_of(name)
     return pipeline
 
 
@@ -106,13 +143,19 @@ async def undeploy_pipeline(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Remove a pipeline."""
+    """Remove a pipeline, its run history and its dependency edges."""
+    from tau.api.dag import get_dag
+
     repo = PipelineRepository(session)
     pipeline = await repo.get_by_name(name)
     if not pipeline:
         raise HTTPException(404, f"Pipeline '{name}' not found")
     remove_job(f"pipeline:{name}")
+    # Runs reference the pipeline by foreign key, which PostgreSQL enforces.
+    await RunRepository(session).delete_for_pipeline(pipeline.id)
     await repo.delete(pipeline)
+    await DependencyRepository(session).remove_pipeline(name)
+    get_dag().remove_pipeline(name)
     return {"status": "removed", "name": name}
 
 
@@ -123,60 +166,14 @@ async def run_pipeline(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Trigger a pipeline run."""
-    pipe_repo = PipelineRepository(session)
-    run_repo = RunRepository(session)
+    """Run a pipeline and wait for the result.
 
-    pipeline = await pipe_repo.get_by_name(name)
+    The run goes to the least-loaded worker and is retried ``retry_count`` times on failure.
+    """
+    pipeline = await PipelineRepository(session).get_by_name(name)
     if not pipeline:
         raise HTTPException(404, f"Pipeline '{name}' not found")
-
-    # Get last successful run
-    last_run = await run_repo.get_last_run(name)
-    last_success = last_run.finished_at if last_run and last_run.status == RunStatus.SUCCESS.value else None
-
-    run_id = str(uuid.uuid4())
-
-    # Create run record
-    run = await run_repo.create(
-        id=run_id,
-        pipeline_id=pipeline.id,
-        pipeline_name=name,
-        trigger="manual",
-        params=params,
-    )
-
-    # Execute
-    result = await execute_pipeline(
-        pipeline_name=name,
-        code=pipeline.code,
-        run_id=run_id,
-        params=params,
-        timeout_seconds=pipeline.timeout_seconds,
-        last_successful_run=last_success,
-    )
-
-    # Update run record
-    run = await run_repo.update(
-        run,
-        status=result.status,
-        started_at=result.started_at,
-        finished_at=result.finished_at,
-        duration_ms=result.duration_ms,
-        result=result.result,
-        error=result.error,
-        trace=result.trace,
-        logs=result.logs,
-    )
-
-    # Update pipeline last run info
-    await pipe_repo.update(
-        pipeline,
-        last_run_at=result.finished_at,
-        last_run_status=result.status,
-    )
-
-    return run
+    return await _run_pipeline(session, pipeline, params=params, trigger="manual")
 
 
 @router.post("/{name}/schedule")
@@ -187,22 +184,20 @@ async def set_schedule(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Set or update pipeline schedule."""
+    """Set, replace or (with neither argument) clear a pipeline's schedule."""
     repo = PipelineRepository(session)
     pipeline = await repo.get_by_name(name)
     if not pipeline:
         raise HTTPException(404, f"Pipeline '{name}' not found")
+    if cron and interval_seconds:
+        raise HTTPException(400, "Give either cron or interval_seconds, not both")
+    _check_schedule(cron, interval_seconds)
 
-    await repo.update(
-        pipeline,
-        schedule_cron=cron,
-        schedule_interval=interval_seconds,
-    )
-
+    pipeline = await repo.set_schedule(pipeline, cron, interval_seconds)
     _sync_schedule(pipeline)
 
     return {
-        "status": "scheduled",
+        "status": "scheduled" if (cron or interval_seconds) else "unscheduled",
         "name": name,
         "cron": cron,
         "interval_seconds": interval_seconds,

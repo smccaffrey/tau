@@ -1,7 +1,8 @@
 """Pipeline run repository."""
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from tau.core.database import to_db_time
 from tau.models.run import PipelineRun
 
 
@@ -10,7 +11,7 @@ class RunRepository:
         self.session = session
 
     async def create(self, **kwargs) -> PipelineRun:
-        run = PipelineRun(**kwargs)
+        run = PipelineRun(**{k: to_db_time(v) for k, v in kwargs.items()})
         self.session.add(run)
         await self.session.commit()
         await self.session.refresh(run)
@@ -28,6 +29,18 @@ class RunRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def get_last_success(self, pipeline_name: str) -> PipelineRun | None:
+        result = await self.session.execute(
+            select(PipelineRun)
+            .where(PipelineRun.pipeline_name == pipeline_name, PipelineRun.status == "success")
+            .order_by(PipelineRun.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_for_pipeline(self, pipeline_id: str) -> None:
+        await self.session.execute(delete(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id))
 
     async def list_by_pipeline(self, pipeline_name: str, limit: int = 10) -> list[PipelineRun]:
         result = await self.session.execute(
@@ -49,7 +62,7 @@ class RunRepository:
     async def list_errors(self, limit: int = 20) -> list[PipelineRun]:
         result = await self.session.execute(
             select(PipelineRun)
-            .where(PipelineRun.status == "failed")
+            .where(PipelineRun.status.in_(["failed", "timeout"]))
             .order_by(PipelineRun.created_at.desc())
             .limit(limit)
         )
@@ -58,7 +71,7 @@ class RunRepository:
     async def update(self, run: PipelineRun, **kwargs) -> PipelineRun:
         for key, value in kwargs.items():
             if value is not None:
-                setattr(run, key, value)
+                setattr(run, key, to_db_time(value))
         await self.session.commit()
         await self.session.refresh(run)
         return run

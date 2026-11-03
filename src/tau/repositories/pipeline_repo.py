@@ -2,6 +2,7 @@
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from tau.core.database import to_db_time
 from tau.models.pipeline import Pipeline
 
 
@@ -10,7 +11,7 @@ class PipelineRepository:
         self.session = session
 
     async def create(self, **kwargs) -> Pipeline:
-        pipeline = Pipeline(**kwargs)
+        pipeline = Pipeline(**{k: to_db_time(v) for k, v in kwargs.items()})
         self.session.add(pipeline)
         await self.session.commit()
         await self.session.refresh(pipeline)
@@ -31,7 +32,17 @@ class PipelineRepository:
     async def update(self, pipeline: Pipeline, **kwargs) -> Pipeline:
         for key, value in kwargs.items():
             if value is not None:
-                setattr(pipeline, key, value)
+                setattr(pipeline, key, to_db_time(value))
+        await self.session.commit()
+        await self.session.refresh(pipeline)
+        return pipeline
+
+    async def set_schedule(
+        self, pipeline: Pipeline, cron: str | None, interval_seconds: int | None
+    ) -> Pipeline:
+        """Replace the schedule. Unlike ``update``, ``None`` clears a field."""
+        pipeline.schedule_cron = cron
+        pipeline.schedule_interval = interval_seconds
         await self.session.commit()
         await self.session.refresh(pipeline)
         return pipeline

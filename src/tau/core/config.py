@@ -41,6 +41,20 @@ class TauSettings(BaseSettings):
     max_concurrent: int = 10
     retry_default: int = 3
 
+    # Distributed mode
+    # Coordinator: run pipelines in this process too (set false so only remote workers run them).
+    local_execution: bool = Field(default=True, alias="TAU_LOCAL_EXECUTION")
+    # Seconds between coordinator health checks of remote workers.
+    heartbeat_interval: int = Field(default=15, alias="TAU_HEARTBEAT_INTERVAL")
+    # Worker: register with this coordinator on startup (and every heartbeat interval).
+    coordinator_url: str | None = Field(default=None, alias="TAU_COORDINATOR_URL")
+    # Worker: API key of the coordinator (defaults to this daemon's TAU_API_KEY).
+    coordinator_api_key: str | None = Field(default=None, alias="TAU_COORDINATOR_API_KEY")
+    # Worker: URL the coordinator should use to reach this daemon, e.g. http://worker1:8400.
+    advertise_url: str | None = Field(default=None, alias="TAU_ADVERTISE_URL")
+    # Worker: name shown in `tau workers` (defaults to the hostname).
+    worker_id: str | None = Field(default=None, alias="TAU_WORKER_ID")
+
     # Storage
     pipelines_dir: str = Field(default="./pipelines", alias="TAU_PIPELINES_DIR")
     # Deploy every *.py pipeline in this folder at startup (create or update).
