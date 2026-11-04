@@ -9,6 +9,11 @@
 # Workers register themselves with the coordinator (TAU_COORDINATOR_URL) and re-register
 # every TAU_HEARTBEAT_INTERVAL seconds, so restarting the coordinator is safe. Scale out
 # with `docker compose up -d --scale worker=4` (each replica registers under its hostname).
+#
+# High availability: `docker compose --profile ha up -d` adds a second coordinator on
+# :8401 sharing the same database. Both serve the API and see the same pipelines, runs,
+# workers and schedules; only the one holding the scheduler lock fires scheduled runs,
+# and the other takes over if it goes down. Put a load balancer in front of both.
 
 x-tau: &tau
   build: ../..
@@ -41,6 +46,18 @@ services:
       TAU_LOCAL_EXECUTION: "false"
     volumes: ["./pipelines:/pipelines:ro"]
     ports: ["127.0.0.1:8400:8400"]
+
+  coordinator-b:
+    <<: *tau
+    hostname: coordinator-b
+    profiles: [ha]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      TAU_API_KEY: ${TAU_API_KEY:?set TAU_API_KEY}
+      TAU_DATABASE_URL: postgresql+asyncpg://tau:tau@db:5432/tau
+      TAU_LOCAL_EXECUTION: "false"
+    ports: ["127.0.0.1:8401:8400"]
 
   worker:
     <<: *tau

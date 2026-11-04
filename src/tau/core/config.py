@@ -41,6 +41,15 @@ class TauSettings(BaseSettings):
     max_concurrent: int = 10
     retry_default: int = 3
 
+    # Execution: "thread" runs each pipeline attempt on its own thread and event loop so
+    # blocking pipeline code cannot stall the daemon; "inline" uses the daemon's loop.
+    execution_mode: str = Field(default="thread", alias="TAU_EXECUTION_MODE")
+    # Extra seconds past a pipeline's timeout before a blocked run thread is abandoned.
+    timeout_grace: int = Field(default=30, alias="TAU_TIMEOUT_GRACE")
+    # Identifies this daemon in run records, so a restart only fails its own stale runs.
+    # Defaults to the hostname; set it when several daemons share a host and database.
+    instance_id: str | None = Field(default=None, alias="TAU_INSTANCE_ID")
+
     # Distributed mode
     # Coordinator: run pipelines in this process too (set false so only remote workers run them).
     local_execution: bool = Field(default=True, alias="TAU_LOCAL_EXECUTION")
@@ -152,6 +161,13 @@ def get_settings() -> TauSettings:
         settings.connections = toml_config["connections"]
 
     return settings
+
+
+def instance_id(settings: TauSettings | None = None) -> str:
+    import socket
+
+    settings = settings or get_settings()
+    return settings.instance_id or socket.gethostname()
 
 
 def get_client_settings() -> ClientSettings:

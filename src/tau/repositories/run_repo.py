@@ -1,6 +1,8 @@
 """Pipeline run repository."""
 
-from sqlalchemy import delete, select
+from datetime import datetime, timezone
+
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from tau.core.database import to_db_time
 from tau.models.run import PipelineRun
@@ -41,6 +43,33 @@ class RunRepository:
 
     async def delete_for_pipeline(self, pipeline_id: str) -> None:
         await self.session.execute(delete(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id))
+
+    async def list_cancel_requested(self, instance_id: str) -> list[PipelineRun]:
+        result = await self.session.execute(
+            select(PipelineRun).where(
+                PipelineRun.instance_id == instance_id,
+                PipelineRun.status == "running",
+                PipelineRun.cancel_requested.is_(True),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def fail_interrupted(self, instance_id: str, error: str) -> int:
+        """Fail runs left ``running``/``pending`` by this instance (or by a pre-0002 daemon)."""
+        result = await self.session.execute(
+            update(PipelineRun)
+            .where(
+                PipelineRun.status.in_(["running", "pending"]),
+                or_(PipelineRun.instance_id == instance_id, PipelineRun.instance_id.is_(None)),
+            )
+            .values(
+                status="failed",
+                error=error,
+                finished_at=to_db_time(datetime.now(tz=timezone.utc)),
+            )
+        )
+        await self.session.commit()
+        return result.rowcount or 0
 
     async def list_by_pipeline(self, pipeline_name: str, limit: int = 10) -> list[PipelineRun]:
         result = await self.session.execute(

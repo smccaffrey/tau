@@ -110,7 +110,9 @@ class TestRemoteWorker:
     @pytest.mark.asyncio
     async def test_execute_without_connect_raises(self):
         w = RemoteWorker(worker_id="r1", host="http://w1:8400", api_key="key")
-        with pytest.raises(RuntimeError, match="not connected"):
+        from tau.workers.remote import WorkerUnavailable
+
+        with pytest.raises(WorkerUnavailable, match="not connected"):
             await w.execute("test", "code", "run-1")
 
     @pytest.mark.asyncio

@@ -37,31 +37,50 @@ class MotherDuckConnector(Connector):
         columns = [desc[0] for desc in result.description]
         return [dict(zip(columns, row)) for row in result.fetchall()]
 
-    async def load(self, data: list[dict], table: str, mode: str = "append", **kwargs) -> int:
-        if not self._conn or not data:
-            return 0
+    async def load(self, data: list[dict], table: str, mode: str = "append",
+                   merge_key: str | list[str] | None = None, **kwargs) -> int:
+        """Load rows. Creates the table (VARCHAR columns) if it does not exist.
 
-        # DuckDB can load directly from Python dicts via DataFrame
+        Upsert deletes rows with the same merge_key and inserts, in one transaction.
+        """
+        from tau.connectors._load import check_load_mode, key_delete_sql
+
+        keys = check_load_mode(mode, merge_key)
+        if not self._conn:
+            await self.connect()
         if mode == "replace":
             self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+        if not data:
+            return 0
 
-        # Create table from first batch if it doesn't exist
         columns = list(data[0].keys())
         try:
             self._conn.execute(f"SELECT 1 FROM {table} LIMIT 0")
         except Exception:
-            # Table doesn't exist — create it
             col_defs = ", ".join(f'"{c}" VARCHAR' for c in columns)
             self._conn.execute(f"CREATE TABLE {table} ({col_defs})")
 
-        # Insert rows
         placeholders = ", ".join(["?"] * len(columns))
         col_str = ", ".join(f'"{c}"' for c in columns)
-        for record in data:
-            values = [record.get(c) for c in columns]
-            self._conn.execute(f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})", values)
-
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            if mode == "upsert":
+                sql, _ = key_delete_sql(table, keys, len(data), lambda i: "?")
+                self._conn.execute(sql, [r.get(k) for r in data for k in keys])
+            self._conn.executemany(
+                f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})",
+                [[r.get(c) for c in columns] for r in data],
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
         return len(data)
+
+    async def get_columns(self, relation: str) -> list[str]:
+        if not self._conn:
+            await self.connect()
+        return [d[0] for d in self._conn.execute(f"SELECT * FROM {relation} LIMIT 0").description]
 
     async def execute(self, query: str, params: list | None = None) -> None:
         if not self._conn:

@@ -1,27 +1,31 @@
-"""Amazon Redshift connector."""
+"""Amazon Redshift connector (PostgreSQL wire protocol, via asyncpg)."""
 
 from __future__ import annotations
-from tau.connectors.base import Connector
+from tau.connectors._load import check_load_mode
+from tau.connectors.postgres import PostgresConnector
 
 
-class RedshiftConnector(Connector):
-    """Connect to Amazon Redshift for extract and load operations."""
+class RedshiftConnector(PostgresConnector):
+    """Connect to Amazon Redshift for extract and load operations.
+
+    Redshift has no ``ON CONFLICT``, so upsert stages the rows in a temp table and does
+    ``DELETE ... USING`` + ``INSERT`` in one transaction.
+    """
 
     def __init__(self, dsn: str | None = None, host: str = "", port: int = 5439,
                  database: str = "", user: str = "", password: str = ""):
-        self.dsn = dsn
+        super().__init__(dsn=dsn or "")
         self.host = host
         self.port = port
         self.database = database
         self.user = user
         self.password = password
-        self._conn = None
 
     async def connect(self) -> None:
         try:
             import asyncpg
         except ImportError:
-            raise ImportError("Install asyncpg: pip install tau-pipelines[postgres]")
+            raise ImportError("Install asyncpg: pip install tau-pipelines[redshift]")
 
         if self.dsn:
             self._conn = await asyncpg.connect(self.dsn)
@@ -31,48 +35,31 @@ class RedshiftConnector(Connector):
                 user=self.user, password=self.password,
             )
 
-    async def disconnect(self) -> None:
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
-
-    async def extract(self, query: str, params: list | None = None, **kwargs) -> list[dict]:
-        if not self._conn:
-            await self.connect()
-        rows = await self._conn.fetch(query, *(params or []))
-        return [dict(row) for row in rows]
-
     async def load(self, data: list[dict], table: str, mode: str = "append",
-                   merge_key: str | None = None, **kwargs) -> int:
-        if not self._conn or not data:
+                   merge_key: str | list[str] | None = None, **kwargs) -> int:
+        keys = check_load_mode(mode, merge_key)
+        if mode != "upsert":
+            return await super().load(data, table, mode=mode, merge_key=merge_key, **kwargs)
+        conn = await self._ensure()
+        if not data:
             return 0
 
         columns = list(data[0].keys())
         col_str = ", ".join(columns)
         placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
-
-        if mode == "replace":
-            await self._conn.execute(f"TRUNCATE TABLE {table}")
-
-        query = f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})"
-        for record in data:
-            values = [record[c] for c in columns]
-            await self._conn.execute(query, *values)
-
+        stage = "__tau_upsert_" + table.replace(".", "_").replace('"', "")
+        key_join = " AND ".join(f"{table}.{k} = {stage}.{k}" for k in keys)
+        async with conn.transaction():
+            await conn.execute(f"DROP TABLE IF EXISTS {stage}")
+            await conn.execute(f"CREATE TEMP TABLE {stage} (LIKE {table})")
+            await conn.executemany(
+                f"INSERT INTO {stage} ({col_str}) VALUES ({placeholders})",
+                [[r.get(c) for c in columns] for r in data],
+            )
+            await conn.execute(f"DELETE FROM {table} USING {stage} WHERE {key_join}")
+            await conn.execute(f"INSERT INTO {table} ({col_str}) SELECT {col_str} FROM {stage}")
+            await conn.execute(f"DROP TABLE {stage}")
         return len(data)
-
-    async def execute(self, query: str, params: list | None = None) -> str:
-        if not self._conn:
-            await self.connect()
-        return await self._conn.execute(query, *(params or []))
-
-    async def get_schema(self, table: str) -> list[dict]:
-        return await self.extract("""
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_name = $1
-            ORDER BY ordinal_position
-        """, [table])
 
 
 def redshift(

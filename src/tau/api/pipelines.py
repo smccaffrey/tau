@@ -14,7 +14,7 @@ from tau.schemas.pipeline import (
     PipelineCreate, PipelineResponse,
     PipelineListResponse, PipelineCodeResponse,
 )
-from tau.daemon.runner import run_pipeline as _run_pipeline
+from tau.daemon.runner import run_pipeline as _run_pipeline, start_background_run
 from tau.daemon.scheduler import add_cron_job, add_interval_job, remove_job, validate_cron
 from tau.schemas.run import RunResponse
 
@@ -163,16 +163,21 @@ async def undeploy_pipeline(
 async def run_pipeline(
     name: str,
     params: dict | None = None,
+    wait: bool = True,
     session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
-    """Run a pipeline and wait for the result.
+    """Run a pipeline and wait for the result (``?wait=false`` returns the running run at once).
 
     The run goes to the least-loaded worker and is retried ``retry_count`` times on failure.
+    Follow a background run with ``GET /runs/{name}/{run_id}``; stop it with
+    ``POST /runs/{run_id}/cancel``.
     """
     pipeline = await PipelineRepository(session).get_by_name(name)
     if not pipeline:
         raise HTTPException(404, f"Pipeline '{name}' not found")
+    if not wait:
+        return await start_background_run(session, pipeline, params=params, trigger="manual")
     return await _run_pipeline(session, pipeline, params=params, trigger="manual")
 
 

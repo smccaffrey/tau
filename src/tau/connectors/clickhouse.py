@@ -1,11 +1,23 @@
-"""ClickHouse connector."""
+"""ClickHouse connector (HTTP interface)."""
 
 from __future__ import annotations
+import json
+import uuid
+
+from tau.connectors._load import check_load_mode
 from tau.connectors.base import Connector
 
 
+class ClickHouseError(RuntimeError):
+    """A query failed; the message carries ClickHouse's own error text."""
+
+
 class ClickHouseConnector(Connector):
-    """Connect to ClickHouse for extract and load operations."""
+    """Connect to ClickHouse for extract and load operations.
+
+    Every request of one connector shares an HTTP session (``session_id``), so temporary
+    tables live until ``disconnect``. Credentials go in headers, not the URL.
+    """
 
     def __init__(self, host: str = "localhost", port: int = 8123, database: str = "default",
                  user: str = "default", password: str = "", secure: bool = False):
@@ -18,17 +30,15 @@ class ClickHouseConnector(Connector):
         self._client = None
 
     async def connect(self) -> None:
-        try:
-            import httpx
-        except ImportError:
-            raise ImportError("httpx is required for ClickHouse connector")
+        import httpx
 
         scheme = "https" if self.secure else "http"
         self._base_url = f"{scheme}://{self.host}:{self.port}"
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            params={"database": self.database, "user": self.user, "password": self.password},
-            timeout=60,
+            params={"database": self.database, "session_id": f"tau-{uuid.uuid4()}"},
+            headers={"X-ClickHouse-User": self.user, "X-ClickHouse-Key": self.password},
+            timeout=300,
         )
 
     async def disconnect(self) -> None:
@@ -36,47 +46,61 @@ class ClickHouseConnector(Connector):
             await self._client.aclose()
             self._client = None
 
-    async def extract(self, query: str, params: dict | None = None, **kwargs) -> list[dict]:
+    async def _post(self, content: str, **params):
         if not self._client:
             await self.connect()
+        resp = await self._client.post("/", content=content.encode(), params=params or None)
+        if resp.status_code >= 400:
+            raise ClickHouseError(f"ClickHouse {resp.status_code}: {resp.text.strip()[:2000]}")
+        return resp
 
-        # Append FORMAT JSON to get structured output
+    async def extract(self, query: str, params: dict | None = None, **kwargs) -> list[dict]:
         q = query.rstrip().rstrip(";")
-        resp = await self._client.post("/", content=f"{q} FORMAT JSON")
-        resp.raise_for_status()
-        result = resp.json()
-        return result.get("data", [])
+        resp = await self._post(
+            f"{q} FORMAT JSON",
+            output_format_json_quote_64bit_integers="0",
+        )
+        return resp.json().get("data", [])
 
-    async def load(self, data: list[dict], table: str, mode: str = "append", **kwargs) -> int:
-        if not self._client or not data:
-            return 0
+    async def load(self, data: list[dict], table: str, mode: str = "append",
+                   merge_key: str | list[str] | None = None, **kwargs) -> int:
+        """Load rows with ``JSONEachRow``.
 
+        Upsert deletes rows with the same merge_key (a lightweight ``DELETE``) and inserts.
+        """
+        keys = check_load_mode(mode, merge_key)
         if mode == "replace":
             await self.execute(f"TRUNCATE TABLE IF EXISTS {table}")
-
-        import json
-        # ClickHouse accepts JSONEachRow format
+        if not data:
+            return 0
         lines = "\n".join(json.dumps(record, default=str) for record in data)
-        insert_params = {
-            "database": self.database,
-            "user": self.user,
-            "password": self.password,
-            "query": f"INSERT INTO {table} FORMAT JSONEachRow",
-        }
-        resp = await self._client.post(
-            "/",
-            content=lines,
-            params=insert_params,
-        )
-        resp.raise_for_status()
+        if mode == "upsert":
+            target = f"({', '.join(keys)})" if len(keys) > 1 else keys[0]
+            # A real (not TEMPORARY) table: mutations run server-side and cannot see
+            # session-scoped temporary tables.
+            stage = f"__tau_upsert_{uuid.uuid4().hex[:12]}"
+            await self.execute(
+                f"CREATE TABLE {stage} ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM {table} WHERE 0"
+            )
+            try:
+                await self._post(lines, query=f"INSERT INTO {stage} FORMAT JSONEachRow")
+                await self.execute(f"DELETE FROM {table} WHERE {target} IN (SELECT {target} FROM {stage})")
+                await self.execute(f"INSERT INTO {table} SELECT * FROM {stage}")
+            finally:
+                await self.execute(f"DROP TABLE IF EXISTS {stage}")
+            return len(data)
+
+        await self._post(lines, query=f"INSERT INTO {table} FORMAT JSONEachRow")
         return len(data)
 
     async def execute(self, query: str, params: dict | None = None) -> str:
-        if not self._client:
-            await self.connect()
-        resp = await self._client.post("/", content=query)
-        resp.raise_for_status()
+        # mutations_sync makes ALTER ... UPDATE/DELETE finish before returning.
+        resp = await self._post(query, mutations_sync="2")
         return resp.text
+
+    async def get_columns(self, relation: str) -> list[str]:
+        resp = await self._post(f"SELECT * FROM {relation} LIMIT 0 FORMAT JSON")
+        return [m["name"] for m in resp.json().get("meta", [])]
 
     async def get_schema(self, table: str) -> list[dict]:
         return await self.extract(f"DESCRIBE TABLE {table}")
