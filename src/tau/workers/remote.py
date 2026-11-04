@@ -92,7 +92,8 @@ class RemoteWorker:
         reached, so the pool can send the run somewhere else.
         """
         if not self._client:
-            raise RuntimeError(f"Worker {self.worker_id} not connected")
+            self._status = "offline"
+            raise WorkerUnavailable(f"Worker {self.worker_id} is not connected")
 
         self._current_load += 1
         self._status = "busy"
@@ -139,10 +140,24 @@ class RemoteWorker:
             if self._status != "offline":
                 self._status = "idle" if self._current_load == 0 else "busy"
 
-    async def heartbeat(self) -> dict:
-        """Check worker health and get current status."""
+    async def cancel(self, run_id: str) -> bool:
+        """Ask the worker to cancel a run it is executing."""
         if not self._client:
-            return {"status": "offline", "worker_id": self.worker_id}
+            return False
+        try:
+            resp = await self._client.post(f"/api/v1/workers/runs/{run_id}/cancel", timeout=10)
+            return resp.status_code == 200 and bool(resp.json().get("cancelled"))
+        except Exception as e:
+            logger.warning(f"[{self.worker_id}] Could not cancel run {run_id}: {e}")
+            return False
+
+    async def heartbeat(self) -> dict:
+        """Check worker health and get current status (connects first if never connected)."""
+        if not self._client:
+            try:
+                await self.connect()
+            except Exception:
+                return {"status": "offline", "worker_id": self.worker_id}
 
         try:
             resp = await self._client.get("/health")

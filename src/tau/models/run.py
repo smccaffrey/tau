@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, JSON, Integer, ForeignKey
+from sqlalchemy import Boolean, String, Text, DateTime, JSON, Integer, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from tau.core.database import Base
 import enum
@@ -33,4 +33,9 @@ class PipelineRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # structured execution trace
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Daemon that recorded the run (TAU_INSTANCE_ID) and the worker it was sent to.
+    instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Set by POST /runs/{id}/cancel; the owning daemon picks it up on its next heartbeat.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

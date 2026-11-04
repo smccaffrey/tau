@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tau.core.database import get_session
 from tau.core.auth import verify_api_key
 from tau.repositories.run_repo import RunRepository
-from tau.schemas.run import RunResponse, RunListResponse, RunLogsResponse
+from tau.schemas.run import CancelResponse, RunResponse, RunListResponse, RunLogsResponse
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -59,6 +59,37 @@ async def get_last_run(
     run = await repo.get_last_run(pipeline_name)
     if not run:
         raise HTTPException(404, f"No runs found for pipeline '{pipeline_name}'")
+    return run
+
+
+@router.post("/{run_id}/cancel", response_model=CancelResponse)
+async def cancel_run(
+    run_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_api_key),
+):
+    """Cancel a queued or running run (local or on a remote worker)."""
+    from tau.daemon.runner import cancel_run as _cancel
+
+    run = await RunRepository(session).get_by_id(run_id)
+    if not run:
+        raise HTTPException(404, f"Run '{run_id}' not found")
+    if run.status not in ("running", "pending"):
+        raise HTTPException(409, f"Run '{run_id}' already finished ({run.status})")
+    return CancelResponse(run_id=run_id, status=await _cancel(session, run))
+
+
+@router.get("/{pipeline_name}/{run_id}", response_model=RunResponse)
+async def get_run(
+    pipeline_name: str,
+    run_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_api_key),
+):
+    """Get one run (use it to follow a run started with ``?wait=false``)."""
+    run = await RunRepository(session).get_by_id(run_id)
+    if not run or run.pipeline_name != pipeline_name:
+        raise HTTPException(404, f"Run '{run_id}' of '{pipeline_name}' not found")
     return run
 
 

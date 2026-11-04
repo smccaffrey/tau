@@ -29,7 +29,16 @@ async def lifespan(app: FastAPI):
     # Init database
     init_engine(settings.database_url)
     await create_tables()
-    logger.info(f"Database initialized: {settings.database_url}")
+    logger.info(f"Database initialized: {_redact(settings.database_url)}")
+
+    from tau.core.config import instance_id
+    from tau.daemon import leader
+    from tau.daemon.runner import recover_interrupted_runs
+
+    interrupted = await recover_interrupted_runs()
+    if interrupted:
+        logger.warning(f"Marked {interrupted} run(s) interrupted by the last shutdown as failed")
+    logger.info(f"Instance id: {instance_id(settings)} (execution mode: {settings.execution_mode})")
 
     # Init worker pool
     pool = WorkerPool()
@@ -61,6 +70,14 @@ async def lifespan(app: FastAPI):
         deployed = await autodeploy(settings.autodeploy_dir)
         logger.info(f"Auto-deployed {len(deployed)} pipeline(s) from {settings.autodeploy_dir}: {', '.join(deployed)}")
 
+    from tau.daemon.bootstrap import sync_state
+
+    await sync_state()  # workers registered before a restart, or with another coordinator
+    if await leader.refresh():
+        logger.info("Scheduler leader: this daemon fires scheduled runs")
+    else:
+        logger.info("Scheduler standby: another daemon holds the scheduler lock")
+
     tasks = [asyncio.create_task(_heartbeat_loop(pool, settings.heartbeat_interval))]
     if settings.coordinator_url:
         tasks.append(asyncio.create_task(_register_loop(settings)))
@@ -72,17 +89,29 @@ async def lifespan(app: FastAPI):
         task.cancel()
     await pool.disconnect_remotes()
     stop_scheduler()
+    await leader.release()
     logger.info("Tau daemon stopped")
 
 
 async def _heartbeat_loop(pool: WorkerPool, interval: int) -> None:
-    """Health-check remote workers so offline ones come back when they recover."""
+    """Periodic housekeeping.
+
+    - health-check remote workers so offline ones come back when they recover
+    - keep or take over the scheduler lock
+    - pick up schedules, DAG edges and workers changed through another coordinator
+    - cancel runs whose cancellation was requested through another coordinator
+    """
+    from tau.daemon import leader
+    from tau.daemon.bootstrap import sync_state
+    from tau.daemon.runner import process_cancel_requests
+
     while True:
         await asyncio.sleep(max(1, interval))
-        try:
-            await pool.broadcast_heartbeat()
-        except Exception as e:  # pragma: no cover - keep the loop alive
-            logger.warning(f"Worker heartbeat failed: {e}")
+        for step in (pool.broadcast_heartbeat, leader.refresh, sync_state, process_cancel_requests):
+            try:
+                await step()
+            except Exception as e:  # pragma: no cover - keep the loop alive
+                logger.warning(f"Heartbeat step {step.__name__} failed: {e}")
 
 
 async def _register_loop(settings) -> None:
@@ -117,6 +146,16 @@ async def _register_loop(settings) -> None:
             await asyncio.sleep(max(1, settings.heartbeat_interval))
 
 
+def _redact(url: str) -> str:
+    """Hide the password in a database URL before logging it."""
+    from sqlalchemy.engine import make_url
+
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return url
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Tau Pipelines",
@@ -132,9 +171,14 @@ def create_app() -> FastAPI:
     async def health():
         from tau.api.workers import get_pool
         pool = get_pool()
+        from tau.core.config import instance_id
+        from tau.daemon import leader
+
         return {
             "status": "ok",
             "version": __version__,
+            "instance_id": instance_id(),
+            "scheduler_leader": leader.is_leader(),
             "scheduler_jobs": list_jobs(),
             "workers": pool.info() if pool else None,
         }
@@ -154,6 +198,7 @@ def main():
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("alembic").setLevel(logging.WARNING)
 
     host = settings.host
     port = settings.port

@@ -415,6 +415,16 @@ async with connector:
 | HTTP API | httpx (built-in) | included |
 | S3 | boto3 | `pip install tau-pipelines[all]` |
 
+`load()` takes `mode="append"` (default), `"replace"` or `"upsert"` (with `merge_key`, one
+column or a list). Each load runs in one transaction. BigQuery supports append and replace
+only. A mode a connector can't do raises `ValueError` instead of silently appending.
+
+**Test coverage.** PostgreSQL, Redshift (through its PostgreSQL code path), MySQL 8,
+ClickHouse, DuckDB and S3 are tested against real servers, including every
+materialization strategy. Snowflake and BigQuery are covered by unit tests only so far,
+because they need cloud accounts; treat them as beta and test against a dev
+account first.
+
 ### Example: API → Warehouse
 
 Using named connections from `tau.toml`:
@@ -464,7 +474,9 @@ tau show <name>
 tau code <name>
 
 # Execution
-tau run <name> [--params '{"key": "value"}']
+tau run <name> [--params '{"key": "value"}']   # waits; exit status 1 unless it succeeded
+tau run <name> --no-wait                       # start in the background, print the run id
+tau cancel <run_id>                            # stop a queued or running run
 tau runs <name> [--last 10]
 
 # Inspection (structured JSON — the AI reads this)
@@ -477,7 +489,7 @@ tau schedule <name> "0 6 * * *"
 tau schedule <name> --every 3600
 tau schedule <name> --disable
 
-# AI-powered
+# AI-powered (needs ANTHROPIC_API_KEY or TAU_AI_API_KEY set where taud runs)
 tau create "load Stripe payments into BigQuery daily"
 tau heal <name> [--auto]
 
@@ -565,6 +577,8 @@ TAU_COORDINATOR_URL=http://coordinator:8400 TAU_ADVERTISE_URL=http://worker-1:84
 - If a worker dies *during* a run, the run is marked failed rather than re-run elsewhere,
   because it may already have written data.
 - Workers re-register every heartbeat interval, so restarting the coordinator is safe.
+  Registered workers are stored in the database; a worker that stops re-registering is
+  forgotten after `max(300s, 20 × TAU_HEARTBEAT_INTERVAL)`.
 - Use the same `TAU_API_KEY` everywhere, or set `TAU_COORDINATOR_API_KEY` on workers.
 - Secrets that pipelines read with `ctx.secret()` (and `tau.toml` connections) must exist on
   the workers, since that is where the code runs.
@@ -572,6 +586,45 @@ TAU_COORDINATOR_URL=http://coordinator:8400 TAU_ADVERTISE_URL=http://worker-1:84
 [`examples/distributed/`](examples/distributed/) runs a coordinator, PostgreSQL and two
 workers with `docker compose`. You can also register a worker by hand with
 `POST /api/v1/workers/register`.
+
+### Running pipelines
+
+- Each attempt runs on its own thread with its own event loop
+  (`TAU_EXECUTION_MODE=thread`, the default). Pipeline code that blocks, such as
+  `time.sleep` or a synchronous driver, can't stall the daemon's API, scheduler or other
+  runs. `inline` runs pipelines on the daemon's loop, as before.
+- **Timeouts.** A pipeline that awaits is stopped at its timeout. Code that blocks without
+  awaiting can't be interrupted. If it finishes late, the run is recorded as `timeout`. If
+  it is still blocked `TAU_TIMEOUT_GRACE` seconds (default 30) after the timeout, the run
+  is recorded as `timeout` and its thread is abandoned.
+- **Cancel.** `tau cancel <run_id>` (or `POST /api/v1/runs/{id}/cancel`) works for queued
+  and running runs, local or on a remote worker. The pipeline gets
+  `asyncio.CancelledError` at its next `await` and the run ends as `cancelled`.
+- **Background runs.** `tau run --no-wait` (or `?wait=false`) returns the run straight
+  away. Follow it with `tau runs <name>` or `GET /api/v1/runs/{name}/{run_id}`.
+- **Restarts.** On startup a daemon marks the runs it left `running` as failed
+  ("Interrupted"). Runs are owned by `TAU_INSTANCE_ID` (default: the hostname), so set it
+  to a stable value where hostnames change on every restart (for example in Kubernetes,
+  use a StatefulSet pod name).
+
+### High availability
+
+Several coordinators can share one PostgreSQL database behind a load balancer. They share
+pipelines, runs, schedules, DAG edges, webhooks and registered workers, and each picks up
+changes made through another within one heartbeat. Only the coordinator holding a
+PostgreSQL advisory lock fires scheduled runs, so each tick runs once. If that coordinator
+stops, another takes the lock on its next heartbeat. A cancel sent to any coordinator
+reaches the run. `docker compose --profile ha up` in `examples/distributed/` starts a
+second coordinator to try this.
+
+With SQLite there is exactly one daemon, and it is always the scheduler.
+
+### Database migrations
+
+The schema is managed with Alembic and upgraded automatically when `taud` starts
+(several daemons starting at once take turns). Databases created by earlier versions are
+recognised and upgraded in place. Back up PostgreSQL before upgrading Tau, as with any
+schema change.
 
 ---
 
@@ -654,7 +707,10 @@ Environment variables override `tau.toml`:
 | `TAU_ADVERTISE_URL` | `http://<hostname>:<port>` | *Worker:* URL the coordinator uses to reach this worker |
 | `TAU_WORKER_ID` | hostname | *Worker:* name shown in `tau workers` |
 | `TAU_COORDINATOR_API_KEY` | `TAU_API_KEY` | *Worker:* key for calling the coordinator |
-| `TAU_HEARTBEAT_INTERVAL` | `15` | Seconds between worker health checks and re-registrations |
+| `TAU_HEARTBEAT_INTERVAL` | `15` | Seconds between worker health checks, re-registrations, scheduler-lock checks and state syncs |
+| `TAU_EXECUTION_MODE` | `thread` | `thread` runs each pipeline attempt on its own thread and event loop; `inline` uses the daemon's loop |
+| `TAU_TIMEOUT_GRACE` | `30` | Seconds past a pipeline's timeout before a blocked run is abandoned |
+| `TAU_INSTANCE_ID` | hostname | Identifies this daemon in run records (restart recovery, cancels). Keep it stable across restarts |
 | `TAU_HOST` | `http://localhost:8400` | *CLI only:* which daemon to talk to |
 
 Deployed schedules are restored automatically when the daemon restarts.
@@ -690,6 +746,8 @@ See [`examples/`](examples/):
 - [x] 8 materialization strategies with dialect-aware SQL
 - [x] Pipeline DAGs with dependency resolution and parallel execution
 - [x] Distributed workers (local + remote)
+- [x] Run cancellation, background runs, restart recovery
+- [x] Schema migrations; several coordinators on one PostgreSQL database
 - [x] Web dashboard
 - [ ] **Tau Cloud** — managed hosting, multi-tenant, deploy from anywhere
 

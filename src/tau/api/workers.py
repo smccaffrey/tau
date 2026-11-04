@@ -5,7 +5,11 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from tau.core.auth import verify_api_key
+from tau.core.database import get_session
+from tau.repositories.worker_repo import WorkerRepository
 
 router = APIRouter(prefix="/workers", tags=["workers"])
 
@@ -50,15 +54,20 @@ async def list_workers(_: str = Depends(verify_api_key)):
 @router.post("/register")
 async def register_worker(
     data: WorkerRegister,
+    session: AsyncSession = Depends(get_session),
     _: str = Depends(verify_api_key),
 ):
     """Register a remote worker.
 
     Idempotent: workers re-register periodically (see TAU_COORDINATOR_URL), so an online
-    worker that registers again with the same host and key is left as it is.
+    worker that registers again with the same host and key is left as it is. The worker is
+    stored in the database, so every coordinator sharing it picks the worker up.
     """
     if not _pool:
         raise HTTPException(503, "Worker pool not initialized")
+    await WorkerRepository(session).upsert(
+        data.worker_id, data.host, data.api_key, data.max_concurrent
+    )
 
     existing = _pool.get_remote(data.worker_id)
     if (
@@ -113,6 +122,14 @@ async def execute_on_this_worker(data: ExecuteRequest, _: str = Depends(verify_a
     return result.to_dict()
 
 
+@router.post("/runs/{run_id}/cancel")
+async def cancel_on_this_worker(run_id: str, _: str = Depends(verify_api_key)):
+    """Cancel a run this daemon is executing for its coordinator."""
+    from tau.daemon.executor import cancel_run
+
+    return {"run_id": run_id, "cancelled": cancel_run(run_id)}
+
+
 @router.post("/heartbeat")
 async def heartbeat(_: str = Depends(verify_api_key)):
     """Trigger a health check on all workers."""
@@ -123,10 +140,15 @@ async def heartbeat(_: str = Depends(verify_api_key)):
 
 
 @router.delete("/{worker_id}")
-async def remove_worker(worker_id: str, _: str = Depends(verify_api_key)):
-    """Remove a worker from the pool."""
+async def remove_worker(
+    worker_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_api_key),
+):
+    """Remove a worker from the pool (a running worker adds itself back when it re-registers)."""
     if not _pool:
         raise HTTPException(503, "Worker pool not initialized")
-    if await _pool.remove_remote(worker_id):
+    stored = await WorkerRepository(session).delete(worker_id)
+    if await _pool.remove_remote(worker_id) or stored:
         return {"status": "removed", "worker_id": worker_id}
     raise HTTPException(404, f"Worker '{worker_id}' not found")

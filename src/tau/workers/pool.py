@@ -8,6 +8,7 @@ from datetime import datetime
 
 from tau.workers.local import LocalWorker
 from tau.workers.remote import RemoteWorker, WorkerUnavailable
+from tau.daemon import executor
 from tau.daemon.executor import ExecutionResult
 
 logger = logging.getLogger("tau.workers.pool")
@@ -37,6 +38,7 @@ class WorkerPool:
         self._dispatch_lock = asyncio.Lock()
         self._last_used: dict[str, int] = {}
         self._ticket = itertools.count(1)
+        self._run_workers: dict[str, LocalWorker | RemoteWorker] = {}  # active run → worker
 
     def add_local(self, worker_id: str = "local-0", max_concurrent: int = 4) -> LocalWorker:
         """Add a local worker."""
@@ -132,10 +134,16 @@ class WorkerPool:
         last_successful_run: datetime | None = None,
         retry_count: int = 0,
         prefer_local: bool = False,
+        on_assigned=None,
     ) -> ExecutionResult:
-        """Dispatch a pipeline run to the best available worker."""
+        """Dispatch a pipeline run to the best available worker.
+
+        ``on_assigned(worker_id)`` is awaited each time the run is handed to a worker.
+        """
         tried: set[str] = set()
         while True:
+            if executor.cancel_requested(run_id):
+                return executor.cancelled_result(datetime.now().astimezone())
             async with self._dispatch_lock:
                 worker = self._select_worker(prefer_local=prefer_local, exclude=tried)
                 if worker is not None:
@@ -151,6 +159,9 @@ class WorkerPool:
             worker_type = "local" if isinstance(worker, LocalWorker) else "remote"
             logger.info(f"Dispatching {pipeline_name} (run={run_id}) to {worker.worker_id} ({worker_type})")
 
+            if on_assigned is not None:
+                await on_assigned(worker.worker_id)
+            self._run_workers[run_id] = worker
             try:
                 result = await worker.execute(
                     pipeline_name=pipeline_name,
@@ -166,11 +177,53 @@ class WorkerPool:
                 logger.warning(f"{e}; failing over {pipeline_name} (run={run_id})")
                 tried.add(worker.worker_id)
                 continue
+            finally:
+                self._run_workers.pop(run_id, None)
 
             result.worker_id = worker.worker_id
             if result.trace is not None:
                 result.trace["worker_id"] = worker.worker_id
             return result
+
+    def worker_for_run(self, run_id: str) -> str | None:
+        worker = self._run_workers.get(run_id)
+        return worker.worker_id if worker else None
+
+    async def cancel(self, run_id: str) -> bool:
+        """Cancel a run dispatched by this pool (or queued in this process)."""
+        worker = self._run_workers.get(run_id)
+        local = executor.cancel_run(run_id)  # marks queued runs and local executions
+        if isinstance(worker, RemoteWorker):
+            return await worker.cancel(run_id) or local
+        return local
+
+    async def sync_remotes(self, rows: list) -> None:
+        """Make the remote workers match ``rows`` (workers registered in the database).
+
+        Workers keep their connection and load when nothing about them changed.
+        """
+        wanted = {r.worker_id: r for r in rows}
+        for w in list(self._remote_workers):
+            if w.worker_id not in wanted and w.worker_id not in self._run_workers_ids():
+                self._remote_workers.remove(w)
+                asyncio.ensure_future(w.disconnect())
+        for row in rows:
+            existing = self.get_remote(row.worker_id)
+            if (
+                existing is not None
+                and existing.host == row.host.rstrip("/")
+                and existing.api_key == row.api_key
+                and existing.max_concurrent == row.max_concurrent
+            ):
+                continue
+            worker = self.add_remote(row.worker_id, row.host, row.api_key, row.max_concurrent)
+            try:
+                await worker.connect()
+            except Exception as e:
+                logger.warning(f"Registered worker {row.worker_id} is unreachable: {e}")
+
+    def _run_workers_ids(self) -> set[str]:
+        return {w.worker_id for w in self._run_workers.values()}
 
     async def broadcast_heartbeat(self) -> list[dict]:
         """Check health of all remote workers."""

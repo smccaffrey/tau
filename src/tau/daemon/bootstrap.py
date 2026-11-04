@@ -88,3 +88,65 @@ async def autodeploy(directory: str | Path) -> list[str]:
                         logger.error(f"Ignoring depends_on of {meta['name']}: {e}")
                 deployed.append(meta["name"])
     return deployed
+
+
+def _schedule_signature(pipeline) -> tuple | None:
+    if pipeline.schedule_cron:
+        return ("cron", pipeline.schedule_cron, "UTC")
+    if pipeline.schedule_interval:
+        return ("interval", pipeline.schedule_interval)
+    return None
+
+
+async def sync_state() -> dict:
+    """Bring this daemon's in-memory state in line with the database.
+
+    Run on every heartbeat so coordinators that share a database agree on schedules,
+    the DAG and the worker pool, whichever one received the change.
+    """
+    from tau.api.dag import get_dag, load_dag
+    from tau.api.pipelines import _sync_schedule
+    from tau.api.workers import get_pool
+    from tau.core.config import get_settings
+    from tau.daemon.scheduler import job_signature, remove_job, scheduled_job_ids
+    from tau.repositories.worker_repo import WorkerRepository
+
+    changed = {"schedules": 0, "dag": False, "workers": 0}
+    async for session in get_session():
+        # Schedules
+        wanted: set[str] = set()
+        for pipeline in await PipelineRepository(session).list_all():
+            job_id = f"pipeline:{pipeline.name}"
+            sig = _schedule_signature(pipeline)
+            if sig is not None:
+                wanted.add(job_id)
+            if job_signature(job_id) != sig:
+                try:
+                    _sync_schedule(pipeline)
+                    changed["schedules"] += 1
+                except Exception as e:
+                    logger.warning(f"Could not sync schedule for {pipeline.name}: {e}")
+        for job_id in scheduled_job_ids():
+            if job_id.startswith("pipeline:") and job_id not in wanted:
+                remove_job(job_id)
+                changed["schedules"] += 1
+
+        # DAG
+        stored = sorted(await DependencyRepository(session).list_edges())
+        current = sorted(
+            (up, name) for name, node in get_dag().nodes.items() for up in node.upstream
+        )
+        if stored != current:
+            await load_dag(session)
+            changed["dag"] = True
+
+        # Workers registered with any coordinator
+        pool = get_pool()
+        if pool is not None:
+            settings = get_settings()
+            repo = WorkerRepository(session)
+            await repo.prune(max(300, 20 * settings.heartbeat_interval))
+            before = {w.worker_id for w in pool._remote_workers}
+            await pool.sync_remotes(await repo.list_all())
+            changed["workers"] = len(before ^ {w.worker_id for w in pool._remote_workers})
+    return changed

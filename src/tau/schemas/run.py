@@ -23,6 +23,9 @@ class RunResponse(BaseModel):
     result: dict | None
     error: str | None
     trace: dict | None
+    worker_id: str | None = None
+    instance_id: str | None = None
+    cancel_requested: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -37,3 +40,8 @@ class RunLogsResponse(BaseModel):
     id: str
     pipeline_name: str
     logs: str | None
+
+
+class CancelResponse(BaseModel):
+    run_id: str
+    status: str  # cancelling | cancelled

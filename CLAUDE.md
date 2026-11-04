@@ -240,7 +240,9 @@ Tau resolves the graph into parallel execution groups. Pipelines with no unmet d
 
 Single machine (default): pipelines run in the daemon process with concurrency control.
 
-Distributed: workers are `taud` instances started with `TAU_COORDINATOR_URL`; they register themselves. Every run goes to the least-loaded online worker and fails over if a worker is unreachable. Pipeline code runs on the worker, so `ctx.secret()` values and `tau.toml` connections must exist there. See `examples/distributed/`.
+Distributed: workers are `taud` instances started with `TAU_COORDINATOR_URL`; they register themselves. Every run goes to the least-loaded online worker and fails over if a worker is unreachable. Pipeline code runs on the worker, so `ctx.secret()` values and `tau.toml` connections must exist there. Several coordinators can share one PostgreSQL database; only the one holding the scheduler lock fires schedules. See `examples/distributed/`.
+
+Each pipeline attempt runs on its own thread and event loop, so blocking code can't stall the daemon, but prefer `await` anyway: cancellation and timeouts only interrupt a pipeline at an `await`. A run still `running` when its daemon restarts is marked failed ("Interrupted").
 
 ```bash
 tau workers  # View worker pool status
@@ -254,8 +256,10 @@ Put `--json` before any command (`tau --json runs my_pipeline`) to get the raw J
 # Deploy a pipeline file to the daemon
 tau deploy my_pipeline.py [--schedule "0 6 * * *"] [--name override]
 
-# Run a pipeline
+# Run a pipeline (waits; exit 1 unless it succeeded)
 tau run <name> [--params '{"key": "value"}']
+tau run <name> --no-wait                    # background; prints the run id
+tau cancel <run_id>                         # stop a queued or running run
 
 # Inspect last run (structured JSON — read this to diagnose issues)
 tau inspect <name> --last-run
@@ -331,7 +335,6 @@ src/tau/
 ├── dashboard/               # Web dashboard (served by daemon)
 │   └── app.py               # Single-page HTML dashboard
 ├── api/                     # REST API endpoints
-├── services/                # Business logic
 ├── repositories/            # Data access
 ├── models/                  # SQLAlchemy models
 └── schemas/                 # Pydantic DTOs

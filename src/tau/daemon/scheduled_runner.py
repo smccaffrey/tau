@@ -11,7 +11,15 @@ logger = logging.getLogger("tau.scheduler")
 
 
 async def scheduled_run(pipeline_name: str):
-    """Execute a scheduled pipeline run, then its downstream dependents if it succeeded."""
+    """Execute a scheduled pipeline run, then its downstream dependents if it succeeded.
+
+    Only the scheduler leader runs it (see ``tau.daemon.leader``).
+    """
+    from tau.daemon import leader
+
+    if not leader.is_leader():
+        logger.debug(f"Skipping scheduled run of {pipeline_name}: another daemon is the scheduler leader")
+        return
     logger.info(f"Scheduled run triggered: {pipeline_name}")
 
     async with database.async_session_factory() as session:

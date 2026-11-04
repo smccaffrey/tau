@@ -108,7 +108,9 @@ Every command is one line. Put `--json` before any command for the raw JSON resp
 
 ```bash
 tau deploy <file> [--schedule "cron"]   # Deploy pipeline
-tau run <name>                          # Run pipeline
+tau run <name>                          # Run pipeline (waits)
+tau run <name> --no-wait                # Start in background, print run id
+tau cancel <run_id>                     # Stop a queued or running run
 tau inspect <name> --last-run           # Structured JSON result (read this)
 tau list                                # List pipelines
 tau errors                              # Recent failures

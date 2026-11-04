@@ -130,9 +130,17 @@ def deploy(
 def run(
     name: str = typer.Argument(..., help="Pipeline name to run"),
     params: Optional[str] = typer.Option(None, "--params", "-p", help="JSON params"),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Start the run and return its id"),
 ):
     """Run a pipeline and wait for the result (exit status 1 if it did not succeed)."""
     parsed_params = json.loads(params) if params else None
+    if no_wait:
+        result = _api("POST", f"/pipelines/{name}/run?wait=false", json=parsed_params)
+        if _emit(result):
+            return
+        console.print(f"[yellow]●[/yellow] {name} — started run {result['id']}")
+        console.print(f"  Follow it: tau runs {name}   Stop it: tau cancel {result['id']}")
+        return
     result = _api("POST", f"/pipelines/{name}/run", json=parsed_params, timeout=None)
     status = result["status"]
     if _emit(result):
@@ -154,6 +162,15 @@ def run(
         console.print(f"  Result: {json.dumps(result['result'], indent=2)}")
     if status != "success":
         raise typer.Exit(1)
+
+
+@app.command()
+def cancel(run_id: str = typer.Argument(..., help="Run id (from `tau runs` or `tau run --no-wait`)")):
+    """Cancel a queued or running pipeline run."""
+    result = _api("POST", f"/runs/{run_id}/cancel")
+    if _emit(result):
+        return
+    console.print(f"[yellow]●[/yellow] Run {run_id} — {result['status']}")
 
 
 @app.command(name="list")
@@ -330,9 +347,10 @@ def runs(
         return
 
     table = Table(title=f"Runs: {name}")
-    table.add_column("ID", style="dim", max_width=8)
+    table.add_column("ID", style="dim", no_wrap=True)
     table.add_column("Status")
     table.add_column("Trigger")
+    table.add_column("Worker")
     table.add_column("Duration")
     table.add_column("Time")
 
@@ -342,9 +360,10 @@ def runs(
         duration = f"{r['duration_ms']}ms" if r.get("duration_ms") is not None else "—"
 
         table.add_row(
-            r["id"][:8],
+            r["id"],
             f"[{color}]{status}[/{color}]",
             r["trigger"],
+            r.get("worker_id") or "—",
             duration,
             r.get("created_at", "—") or "—",
         )

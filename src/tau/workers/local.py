@@ -5,17 +5,17 @@ import asyncio
 import logging
 from datetime import datetime
 
+from tau.daemon import executor
 from tau.daemon.executor import execute_pipeline, ExecutionResult
 
 logger = logging.getLogger("tau.workers.local")
 
 
 class LocalWorker:
-    """Runs pipelines locally in the daemon's event loop.
+    """Runs pipelines in the daemon process.
 
-    For single-machine deployments:
-    - Pipelines run as async tasks in the daemon process
-    - Concurrency controlled via semaphore
+    - Each attempt runs on its own thread and event loop (``TAU_EXECUTION_MODE=thread``)
+    - Concurrency controlled via semaphore; waiting runs count as load
     - No network overhead — direct in-process execution
     """
 
@@ -57,9 +57,13 @@ class LocalWorker:
         retry_count: int = 0,
     ) -> ExecutionResult:
         """Execute a pipeline with concurrency control (waits for a free slot)."""
+        executor.register_run(run_id)  # cancellable while queued
         self._queued += 1
         try:
             await self._semaphore.acquire()
+        except BaseException:
+            executor.forget_run(run_id)
+            raise
         finally:
             self._queued -= 1
         self._active_runs[run_id] = asyncio.current_task()
@@ -81,13 +85,8 @@ class LocalWorker:
             self._semaphore.release()
 
     async def cancel(self, run_id: str) -> bool:
-        """Cancel a running pipeline."""
-        task = self._active_runs.get(run_id)
-        if task:
-            task.cancel()
-            self._active_runs.pop(run_id, None)
-            return True
-        return False
+        """Cancel a queued or running pipeline. The run finishes with status ``cancelled``."""
+        return executor.cancel_run(run_id)
 
     def info(self) -> dict:
         return {

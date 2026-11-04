@@ -9,6 +9,17 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger("tau.scheduler")
 
 _scheduler: AsyncIOScheduler | None = None
+# job id → what it was scheduled with, so a periodic sync only touches jobs that changed
+# (re-adding an interval job would restart its countdown).
+_signatures: dict[str, tuple] = {}
+
+
+def job_signature(job_id: str) -> tuple | None:
+    return _signatures.get(job_id)
+
+
+def scheduled_job_ids() -> list[str]:
+    return list(_signatures)
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -78,6 +89,7 @@ def add_cron_job(
         replace_existing=True,
         misfire_grace_time=60,
     )
+    _signatures[job_id] = ("cron", cron_expression, timezone)
     logger.info(f"Scheduled job '{job_id}' with cron: {cron_expression}")
 
 
@@ -103,11 +115,13 @@ def add_interval_job(
         replace_existing=True,
         misfire_grace_time=60,
     )
+    _signatures[job_id] = ("interval", seconds)
     logger.info(f"Scheduled job '{job_id}' every {seconds}s")
 
 
 def remove_job(job_id: str):
     scheduler = get_scheduler()
+    _signatures.pop(job_id, None)
     try:
         scheduler.remove_job(job_id)
         logger.info(f"Removed job '{job_id}'")
