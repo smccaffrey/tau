@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tau.core.auth import verify_api_key
 from tau.core.database import get_session
-from tau.dag.resolver import DAGResolver, CycleError
+from tau.dag.resolver import CycleError, DAGResolver
+from tau.models.pipeline import PipelineStatus
 from tau.repositories.dependency_repo import DependencyRepository
+from tau.repositories.pipeline_repo import PipelineRepository
 
 router = APIRouter(prefix="/dag", tags=["dag"])
 
@@ -23,6 +25,12 @@ async def load_dag(session: AsyncSession) -> int:
     """Rebuild the in-memory DAG from the database. Returns the number of edges."""
     edges = await DependencyRepository(session).list_edges()
     _dag.nodes.clear()
+    # Register every active pipeline as a node first, so pipelines with no
+    # declared dependencies still appear in the DAG (otherwise the graph is
+    # empty until a dependency edge exists).
+    for pipeline in await PipelineRepository(session).list_all():
+        if pipeline.status == PipelineStatus.ACTIVE.value:
+            _dag.add_pipeline(pipeline.name)
     for up, down in edges:
         _dag.add_dependency(up, down)
     return len(edges)
@@ -39,8 +47,14 @@ class DependenciesSet(BaseModel):
 
 
 @router.get("")
-async def get_dag_info(_: str = Depends(verify_api_key)):
+async def get_dag_info(
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(verify_api_key),
+):
     """Get the full DAG structure."""
+    # Rebuild from the database so pipelines deployed since startup (including
+    # standalone ones that add no dependency edge) are always reflected.
+    await load_dag(session)
     try:
         return _dag.to_dict()
     except CycleError as e:
